@@ -1,0 +1,23 @@
+# 构建产物
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+.vs/
+
+# 发布产物（不进仓库；安装包走 GitHub Releases）
+dist/
+*.exe
+*.dll
+*.pdb
+
+# 安装器负载（构建时由主程序产物生成）
+payload.zip
+
+# 同步工具的本地产物（同步状态，用于判断目标是否被外部改过）
+tools/.sync-state.json
+
+# 运行时生成
+config.json
+error.log

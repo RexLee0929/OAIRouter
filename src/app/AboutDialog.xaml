@@ -1,0 +1,45 @@
+<Window x:Class="OAIRouter.AboutDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="OAIRouter"
+        Width="640" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="#F2F6FB" FontFamily="Microsoft YaHei UI">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="White" BorderBrush="#E2E8F1" BorderThickness="1"
+                CornerRadius="8" Padding="14,20,14,26">
+            <RichTextBox x:Name="Body" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                         VerticalScrollBarVisibility="Auto" MaxHeight="440"
+                         IsDocumentEnabled="True" />
+        </Border>
+
+        <Border Grid.Row="1" Background="#F7FAFE" CornerRadius="8" Padding="14,9" Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="作者" FontSize="12" Foreground="#5C5C5C" VerticalAlignment="Center" />
+                <TextBlock Text="  Rex Lee  " FontSize="12" Foreground="#1B1B1B" VerticalAlignment="Center" />
+                <Border x:Name="MailPill" Background="White" BorderBrush="#E2E8F1" BorderThickness="1"
+                        CornerRadius="12" Padding="9,4" Cursor="Hand" MouseLeftButtonUp="OnCopyEmail">
+                    <StackPanel Orientation="Horizontal">
+                        <Path Data="M4 6h16v12H4zM4 7l8 6 8-6" Width="13" Height="13" Stretch="Uniform"
+                              Stroke="#5C5C5C" StrokeThickness="1.5" VerticalAlignment="Center" Margin="0,0,6,0" />
+                        <TextBlock x:Name="MailText" Text="rexlee@rexleepro.com" FontSize="11.5"
+                                   Foreground="#1B1B1B" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
+                <TextBlock x:Name="CopyHint" Text="" FontSize="11.5" Foreground="{DynamicResource AccentBrush}"
+                           Margin="9,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="关闭" Style="{StaticResource PrimaryButton}" Width="96"
+                    IsDefault="True" IsCancel="True" Click="OnClose" />
+        </StackPanel>
+    </Grid>
+</Window>
