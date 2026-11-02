@@ -1,4 +1,5 @@
 using System.Windows;
+using OAIRouter.Ui;
 using System.Windows.Input;
 
 namespace OAIRouter;
@@ -11,12 +12,7 @@ public partial class ModelsWindow : Window
     {
         InitializeComponent();
         ModelList.ItemsSource = _cfg.Models;
-    }
-
-    protected override void OnSourceInitialized(EventArgs e)
-    {
-        base.OnSourceInitialized(e);
-        WindowChrome.Apply(this);
+        ToolWindow.Attach(this);
     }
 
     private void OnNewKeyDown(object sender, KeyEventArgs e)

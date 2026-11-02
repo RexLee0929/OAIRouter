@@ -4,15 +4,17 @@
         Title="OAIRouter"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True" Focusable="False"
-        ResizeMode="NoResize" SizeToContent="WidthAndHeight">
+        ResizeMode="NoResize" SizeToContent="WidthAndHeight"
+        WindowStartupLocation="Manual" Opacity="0">
+    <!-- 位置由 Toast.Place() 在内容渲染完成后算：默认落在程序正上方居中，
+         「已最小化到托盘」这类窗口看不见的提示才落到任务栏一侧。
+         Opacity=0 起步：窗口先按默认位置建出来，摆好之前绝不显形，否则左上角会闪一下。 -->
     <Border Margin="16" Background="White" CornerRadius="10"
             BorderBrush="#DEE6F0" BorderThickness="1" Padding="14,11"
             MinWidth="230" MaxWidth="370">
         <StackPanel Orientation="Horizontal">
-            <Path x:Name="Glyph" Width="16" Height="16" Stretch="Uniform"
-                  Stroke="{DynamicResource AccentBrush}" StrokeThickness="1.6"
-                  StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                  VerticalAlignment="Top" Margin="0,1,9,0" />
+            <!-- 图标由 Toast.xaml.cs 用 Icons.Get 填进来（成功=success / 警告=warning，16px） -->
+            <ContentControl x:Name="Glyph" VerticalAlignment="Top" Margin="0,1,9,0" />
             <TextBlock x:Name="Message" FontFamily="Microsoft YaHei UI" FontSize="12"
                        Foreground="#1B1B1B" TextWrapping="Wrap" MaxWidth="320" LineHeight="18" />
         </StackPanel>

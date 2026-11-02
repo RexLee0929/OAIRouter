@@ -4,14 +4,13 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using OAIRouter.Ui;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
-using ShapePath = System.Windows.Shapes.Path;
 
 namespace OAIRouter;
 
@@ -28,7 +27,7 @@ public partial class MainWindow : Window
     private bool _startServiceOnLoad;
     private UsageGroup _group = UsageGroup.Time;
     private TimeSpan _bucket = TimeSpan.FromDays(1);
-    private DateTime _lastUsageRefresh = DateTime.MinValue;
+    private int _usageDirty;
     private bool _routeAsc = true;
     private bool _mapAsc = true;
     private bool _serviceRunning;
@@ -46,9 +45,20 @@ public partial class MainWindow : Window
         DataContext = this;
 
         Title = $"{Brand.Name} {Brand.Version}";
-        Icon = BitmapFrame.Create(new Uri("pack://application:,,,/app.ico"));
+        Icon = BrandIcon.Source;   // 取 ico 里最大的一帧，别让系统拿首帧去放大（规范 §二）
+
+        // 规范尺寸 1280×820；小屏（1366×768）或高缩放下不能溢出工作区。
+        // 注意不要设 MaxWidth/MaxHeight：它们会限制最大化尺寸，
+        // 导致窗口可见区域比屏幕小一圈，右侧露出黑边。
+        var work = SystemParameters.WorkArea;
+        Width = Math.Min(Width, work.Width);
+        Height = Math.Min(Height, work.Height);
 
         BuildMenu();
+
+        // 快捷键的另一半：XAML 里声明 KeyBinding，这里接命令（§五.2 显示与注册同源）
+        CommandBindings.Add(new CommandBinding(ShellCommands.ClearLog, (_, _) => ArmClearLog(ClearLogButton)));
+        CommandBindings.Add(new CommandBinding(ShellCommands.Quit, (_, _) => App.Quit()));
 
         RouteItems.ItemsSource = _cfg.Routes;
         MapItems.ItemsSource = _cfg.ModelMap;
@@ -74,7 +84,12 @@ public partial class MainWindow : Window
 
         App.Proxy.Notify += msg => ShowToast(msg, warn: true);
 
-        _statsTimer.Tick += (_, _) => UpdateStats();
+        _statsTimer.Tick += (_, _) =>
+        {
+            UpdateStats();
+            if (UsagePanel.Visibility == Visibility.Visible && Interlocked.Exchange(ref _usageDirty, 0) != 0)
+                RefreshUsage();
+        };
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); ConfigStore.Save(_cfg); };
 
         CreateTray();
@@ -109,6 +124,16 @@ public partial class MainWindow : Window
 
     /* ----------------------------- 菜单 ----------------------------- */
 
+    /// <summary>
+    /// 不可逆命令 → 确认文案 + 状态栏说明（§七.3：正文要给后果）。
+    /// 集中在菜单分发这一处，加新命令时漏不掉确认（§七 阶梯 ③）。
+    /// </summary>
+    private static readonly Dictionary<string, (string Confirm, string Hint)> Destructive = new()
+    {
+        ["clear-log"] = ("确认清空", "再点一次「确认清空」清空运行日志"),
+        ["reset-all"] = ("确认重置", "再点一次「确认重置」执行：规则、映射、价格、用量与日志全清，不可撤销"),
+    };
+
     private void BuildMenu()
     {
         MenuBarHost.Children.Clear();
@@ -116,16 +141,16 @@ public partial class MainWindow : Window
         {
             var button = new Button
             {
-                Content = StripMnemonic(group.Title),
+                // 助记符原样交给 WPF（§五.2）：模板里的 ContentPresenter 开了
+                // RecognizesAccessKey，会把「服务(_S)」渲染成「服务(S)」并注册 Alt+S。
+                // 之前在这里把「(_」替换成「(」，等于把助记键抹掉、只留个装饰括号。
+                Content = group.Title,
                 Style = (Style)FindResource("TopMenuButton"),
             };
             button.Click += (_, _) => OpenMenu(button, group);
             MenuBarHost.Children.Add(button);
         }
     }
-
-    private static string StripMnemonic(string title)
-        => title.Replace("(_", "(").Replace(")", ")");
 
     private void OpenMenu(Button anchor, MenuGroupData group)
     {
@@ -151,26 +176,17 @@ public partial class MainWindow : Window
 
             var checkedOn = item.Group == "view" && item.Value == "autoscroll" && _cfg.AutoScrollLog;
 
-            var icon = new ShapePath
+            // 勾选行用 check（14px、强调色）；其余按表里的键取，缺图时 Icons 自己兜底
+            var iconBrush = item.Group is not null
+                ? (checkedOn ? (Brush)FindResource("AccentBrush") : Brushes.Transparent)
+                : new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B));
+            var icon = Icons.Get(item.Group is not null ? "check" : item.Icon, iconBrush,
+                item.Group is not null ? 14 : 16);
+            if (icon is not null)
             {
-                Data = Geometry.Parse(item.Group is not null
-                    ? Icons.Paths["check"]
-                    : Icons.Paths.TryGetValue(item.Icon ?? "", out var p) ? p : Icons.Paths["arrow"]),
-                Stroke = item.Group is not null
-                    ? (checkedOn ? (Brush)FindResource("AccentBrush") : Brushes.Transparent)
-                    : new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B)),
-                StrokeThickness = item.Group is not null ? 2.2 : 1.6,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                StrokeLineJoin = PenLineJoin.Round,
-                Width = 16,
-                Height = 16,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            Grid.SetColumn(icon, 0);
-            grid.Children.Add(icon);
+                Grid.SetColumn(icon, 0);
+                grid.Children.Add(icon);
+            }
 
             var text = new TextBlock
             {
@@ -205,6 +221,14 @@ public partial class MainWindow : Window
             };
             button.Click += (_, _) =>
             {
+                // 不可逆命令：就地变「确认××」，再点一次才执行（§七 阶梯 ③，不开窗）
+                if (Destructive.TryGetValue(item.Command, out var confirm))
+                {
+                    if (InlineConfirm.Arm(button, confirm.Confirm, () => { MenuPopup.IsOpen = false; Run(item); }, text))
+                        ShowStatusFlash(confirm.Hint);
+                    return;
+                }
+
                 MenuPopup.IsOpen = false;
                 Run(item);
             };
@@ -261,6 +285,7 @@ public partial class MainWindow : Window
             case "open-log": OpenLogFile(); break;
             case "about": new AboutDialog { Owner = this }.ShowDialog(); break;
             case "email": CopyEmail(); break;
+            case "quit": App.Quit(); break;
         }
     }
 
@@ -490,40 +515,29 @@ public partial class MainWindow : Window
         _mapAsc = !_mapAsc;
     }
 
-    private void SortRoutes(bool asc)
+    private void SortRoutes(bool asc) => SortBy(_cfg.Routes, r => r.Name, r => r.Prefix, asc);
+
+    private void SortMaps(bool asc) => SortBy(_cfg.ModelMap, m => m.Alias, m => m.Target, asc);
+
+    /// <summary>按主键排序，主键相同再看次键；用 Move 逐项归位，不重建集合。</summary>
+    private void SortBy<T>(ObservableCollection<T> list, Func<T, string?> key, Func<T, string?> sub, bool asc)
     {
-        var ordered = _cfg.Routes.ToList();
+        var ordered = list.ToList();
         ordered.Sort((a, b) =>
         {
-            var c = string.Compare((a.Name ?? "").Trim(), (b.Name ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
-            if (c == 0) c = string.Compare((a.Prefix ?? "").Trim(), (b.Prefix ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+            var c = string.Compare((key(a) ?? "").Trim(), (key(b) ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+            if (c == 0)
+                c = string.Compare((sub(a) ?? "").Trim(), (sub(b) ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
             return asc ? c : -c;
         });
-        Resort(_cfg.Routes, ordered);
-        QueueSave();
-    }
 
-    private void SortMaps(bool asc)
-    {
-        var ordered = _cfg.ModelMap.ToList();
-        ordered.Sort((a, b) =>
-        {
-            var c = string.Compare((a.Alias ?? "").Trim(), (b.Alias ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
-            if (c == 0) c = string.Compare((a.Target ?? "").Trim(), (b.Target ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
-            return asc ? c : -c;
-        });
-        Resort(_cfg.ModelMap, ordered);
-        QueueSave();
-    }
-
-    /// <summary>用 Move 逐项归位，不重建集合，避免打断正在编辑的单元格。</summary>
-    private static void Resort<T>(ObservableCollection<T> list, List<T> ordered)
-    {
         for (var i = 0; i < ordered.Count; i++)
         {
             var current = list.IndexOf(ordered[i]);
             if (current != i) list.Move(current, i);
         }
+
+        QueueSave();
     }
 
     private void OnToggleEditMap(object sender, RoutedEventArgs e)
@@ -560,20 +574,23 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement { DataContext: ModelMapping map }) _cfg.ModelMap.Remove(map);
     }
 
-    private void OpenPricing()
+    private void OpenPricing() => ShowToolWindow(() => new PricingWindow());
+
+    private void OpenModels() => ShowToolWindow(() => new ModelsWindow());
+
+    /// <summary>设置类窗口：关闭后统一保存配置并刷新统计。</summary>
+    private void ShowToolWindow(Func<Window> create)
     {
-        var window = new PricingWindow { Owner = this };
+        var window = create();
+
+        // Owner 必须给：没有 Owner，XAML 里的 CenterOwner 会退化成系统默认位置，
+        // 窗口就永远弹在屏幕左上角那一块（用户说的「位置被固定死了」）。
+        window.Owner = this;
         window.ShowDialog();
+
         QueueSave();
         RefreshUsage();
         UpdateStats();
-    }
-
-    private void OpenModels()
-    {
-        new ModelsWindow { Owner = this }.ShowDialog();
-        QueueSave();
-        RefreshUsage();
     }
 
     private void ExportConfig()
@@ -671,16 +688,12 @@ public partial class MainWindow : Window
         ShowStatusFlash("已导入所选内容");
     }
 
+    /// <summary>
+    /// 重置全部数据。**调用前必须已确认** —— 入口只有菜单里那一项的就地确认（见 <see cref="Destructive"/>），
+    /// 不再为一次点击开模态框（§七 阶梯 ③）。
+    /// </summary>
     private void ResetAllData()
     {
-        var dialog = new ConfirmDialog(
-            "重置程序数据",
-            "会清空路由规则、模型映射、价格表、模型库，并删除用量记录与日志文件。\n\n此操作不可撤销，建议先「导出配置」。",
-            "重置", danger: true)
-        { Owner = this };
-
-        if (dialog.ShowDialog() != true) return;
-
         var fresh = ConfigStore.CreateDefault();
 
         _cfg.Routes.Clear();
@@ -796,6 +809,7 @@ public partial class MainWindow : Window
             _ => TimeSpan.FromDays(1),
         };
         RefreshUsage();
+        UsageScroll.ScrollToTop();
     }
 
     private void SwitchGroup(UsageGroup group)
@@ -807,27 +821,40 @@ public partial class MainWindow : Window
         MarkGroupButton(GroupTime, group == UsageGroup.Time);
         BucketBox.Visibility = group == UsageGroup.Time ? Visibility.Visible : Visibility.Collapsed;
         RefreshUsage();
+        UsageScroll.ScrollToTop();
     }
 
-    private void OnUsageChanged()
-    {
-        if (UsagePanel.Visibility != Visibility.Visible) return;
-        if ((DateTime.Now - _lastUsageRefresh).TotalMilliseconds < 1500) return;
-        _lastUsageRefresh = DateTime.Now;
-        Dispatcher.BeginInvoke(RefreshUsage);
-    }
+    private void OnUsageChanged() => Interlocked.Exchange(ref _usageDirty, 1);
 
     private void RefreshUsage()
     {
+        var offset = UsageScroll.VerticalOffset;
         UsageItems.ItemsSource = UsageStats.Group(_group, _cfg, _bucket);
+        if (UsagePanel.IsVisible && offset > 0)
+        {
+            UsageScroll.UpdateLayout();
+            UsageScroll.ScrollToVerticalOffset(offset);
+        }
 
         var summary = UsageStats.Summary(_cfg);
         var money = summary.Cost > 0 ? $" · {UsageStats.Money(summary.Cost)}" : "";
         UsageSummary.Text = $"{summary.Requests} 次 · 输入 {summary.Prompt:N0} · 输出 {summary.Completion:N0}{money}";
     }
 
-    private void OnClearLog(object sender, RoutedEventArgs e) => ClearLog();
+    private void OnClearLog(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button) ArmClearLog(button);
+        else ClearLog();
+    }
 
+    /// <summary>清空日志不可撤销：按钮就地变「确认清空」，再点一次才真清（§七 阶梯 ③）。</summary>
+    private void ArmClearLog(Button button)
+    {
+        if (InlineConfirm.Arm(button, "确认清空", ClearLog))
+            ShowStatusFlash("再点一次「确认清空」执行");
+    }
+
+    /// <summary>真正的清空。**调用前必须已确认** —— 入口只有内联确认（卡片按钮 / 菜单项 / Ctrl+L）。</summary>
     private void ClearLog()
     {
         LogStore.Instance.Clear();
@@ -871,13 +898,67 @@ public partial class MainWindow : Window
         RouteEmpty.Visibility = _cfg.Routes.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         MapEmpty.Visibility = _cfg.ModelMap.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-        StatusLeft.Text = _serviceRunning
-            ? $"运行中 · 请求 {summary.Requests} / 失败 {summary.Failed}"
-            : "已停止 · 点击「启动服务」开始转发";
+        if (_errorStatus is not null)
+        {
+            // 出错期间状态栏钉住红字，别被统计刷新盖掉
+            StatusLeft.Text = _errorStatus;
+            StatusLeft.Foreground = (Brush)FindResource("ErrorBrush");
+        }
+        else
+        {
+            StatusLeft.Foreground = (Brush)FindResource("HintBrush");
+            StatusLeft.Text = _serviceRunning
+                ? $"运行中 · 请求 {summary.Requests} / 失败 {summary.Failed}"
+                : "已停止 · 点击「启动服务」开始转发";
+        }
+
         StatusRight.Text = $"端口 {_cfg.Port} · 路由 {_cfg.Routes.Count} · 映射 {_cfg.ModelMap.Count}";
 
         if (_cfg.AutoScrollLog && LogList.Items.Count > 0)
             LogList.ScrollIntoView(LogList.Items[^1]);
+    }
+
+    /* ----------------------------- 出错 ----------------------------- */
+
+    private string? _errorStatus;      // 非空时状态栏显示红字
+    private DispatcherTimer? _errorTimer;
+
+    /// <summary>
+    /// 未捕获异常的出口（规范 §七.4 的三通道）：error.log 已由 App 写过，
+    /// 这里负责状态栏红字 + 自绘错误框，绝不「弹个框说完蛋了然后界面啥也没变」。
+    /// </summary>
+    public void ReportError(Exception ex)
+    {
+        var detail = FirstLine(ex.Message);
+
+        _errorStatus = $"出错：{detail}";
+        UpdateStats();                                  // 红字立刻上屏
+
+        _errorTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        _errorTimer.Stop();
+        _errorTimer.Tick -= OnErrorStatusExpired;
+        _errorTimer.Tick += OnErrorStatusExpired;
+        _errorTimer.Start();                            // 30 秒后自动回到统计
+
+        ErrorDialog.Report(this, "刚才的操作没有完成",
+            $"{detail}\n\n错误详情已写入 error.log，程序可以继续使用。",
+            App.LogPath);
+    }
+
+    private void OnErrorStatusExpired(object? sender, EventArgs e)
+    {
+        _errorTimer?.Stop();
+        _errorStatus = null;
+        UpdateStats();
+    }
+
+    /// <summary>取异常消息的第一行、压到一句话长度：正文只说「发生了什么」。</summary>
+    private static string FirstLine(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "程序遇到了未预料的情况。";
+
+        var one = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return one.Length > 110 ? one[..110] + "…" : one;
     }
 
     private void ShowStatusFlash(string text)
@@ -888,7 +969,8 @@ public partial class MainWindow : Window
         timer.Start();
     }
 
-    public void ShowToast(string message, bool warn = false) => Toast.Show(message, warn);
+    public void ShowToast(string message, bool warn = false, ToastAnchor anchor = ToastAnchor.ProgramTop)
+        => Toast.Show(message, warn, anchor);
 
     private void QueueSave()
     {
@@ -902,12 +984,13 @@ public partial class MainWindow : Window
     {
         try
         {
-            var stream = Application.GetResourceStream(new Uri("pack://application:,,,/app.ico"))?.Stream;
-            if (stream is null) return;
+            // 托盘图标也按尺寸取原始帧（§十三.8）：问外壳要小图标尺寸，
+            // 96 DPI 是 16、150% 是 24，ico 里都有对应帧 —— 不拿 48/256 去缩。
+            var size = Math.Max(16, Forms.SystemInformation.SmallIconSize.Width);
 
             _tray = new Forms.NotifyIcon
             {
-                Icon = new System.Drawing.Icon(stream),
+                Icon = BrandIcon.DrawingIcon(size),
                 Text = $"{Brand.Name} {Brand.Version}",
                 Visible = true,
             };
@@ -926,21 +1009,44 @@ public partial class MainWindow : Window
 
     private void ShowTrayMenu()
     {
-        TrayMenu.Show(new[]
+        // 复用主菜单树：主菜单加项，托盘自动跟上，不再维护第二份入口列表
+        var menu = AppMenu.Build();
+
+        var entries = new List<TrayEntry>
         {
             TrayEntry.Of("显示主窗口", "window", () => RestoreFromTray(silent: false)),
             TrayEntry.Sep(),
-            TrayEntry.Of("启动服务", "play", StartService),
-            TrayEntry.Of("停止服务", "stop", StopService),
-            TrayEntry.Sep(),
-            TrayEntry.Of("退出", "clear", App.Quit),
-        });
+        };
+
+        foreach (var item in menu
+                     .Where(g => g.Title.StartsWith("服务", StringComparison.Ordinal))
+                     .SelectMany(g => g.Items)
+                     .Where(i => i.Command != "quit"))   // 退出单独放末位，别在中间出现两次
+        {
+            if (item.Separator)
+            {
+                entries.Add(TrayEntry.Sep());
+                continue;
+            }
+
+            var captured = item;
+            entries.Add(TrayEntry.Of(item.Text, item.Icon, () => Run(captured)));
+        }
+
+        // 「退出」的文案与图标也取自菜单表：托盘不另写一份字符串（§五.6）
+        var quit = menu.SelectMany(g => g.Items).FirstOrDefault(i => i.Command == "quit");
+
+        entries.Add(TrayEntry.Sep());
+        entries.Add(TrayEntry.Of(quit?.Text ?? "退出程序", quit?.Icon, App.Quit));
+
+        TrayMenu.Show(entries);
     }
 
     private void HideToTray(bool silent)
     {
         Hide();
-        if (!silent) ShowToast("已最小化到托盘，双击图标可恢复");
+        // 主窗口已经藏起来了，这条提示只能落到任务栏一侧
+        if (!silent) ShowToast("已最小化到托盘，双击图标可恢复", anchor: ToastAnchor.TrayCorner);
     }
 
     public void RestoreFromTray(bool silent)
@@ -969,34 +1075,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        UsageStats.Changed -= OnUsageChanged;
         _statsTimer.Stop();
         _tray?.Dispose();
         base.OnClosing(e);
-    }
-
-    /* ----------------------------- 快捷键 ----------------------------- */
-
-    protected override void OnPreviewKeyDown(KeyEventArgs e)
-    {
-        if (e.KeyboardDevice.Modifiers == ModifierKeys.Control)
-        {
-            var inText = Keyboard.FocusedElement is TextBox or ComboBox;
-            switch (e.Key)
-            {
-                case Key.C when !inText:
-                    CopyAddress();
-                    e.Handled = true;
-                    break;
-                case Key.L:
-                    ClearLog();
-                    e.Handled = true;
-                    break;
-                case Key.Q:
-                    App.Quit();
-                    e.Handled = true;
-                    break;
-            }
-        }
-        base.OnPreviewKeyDown(e);
     }
 }

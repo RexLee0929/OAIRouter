@@ -7,8 +7,13 @@ namespace OAIRouter;
 public sealed class UsageRecord
 {
     public DateTime Time { get; init; }
+    public DateTime? StartedAt { get; init; }
+    public string SessionId { get; init; } = "";
     public string Route { get; init; } = "";
+    /// <summary>展示名 = 模型映射名（客户端实际填的那个别名）。分组与「按模型」列表都看它。</summary>
     public string Model { get; init; } = "";
+    /// <summary>真实名 = 发给上游的模型名。价格表配的是它，计价只认它。</summary>
+    public string Target { get; init; } = "";
     public long Prompt { get; init; }
     public long Completion { get; init; }
     public long CacheRead { get; init; }
@@ -91,11 +96,18 @@ public static class UsageStats
                     try
                     {
                         if (JsonNode.Parse(lines[i]) is not JsonObject o) continue;
+                        var display = o["m"]?.GetValue<string>() ?? "";
+                        // 老记录只有 m（当时存的就是真实名），没有 mt —— 回退成 m，
+                        // 既保证计价仍能命中，也保证历史数据不会因为这次改动而变「无价格」。
+                        var real = o["mt"]?.GetValue<string>() is { Length: > 0 } mt ? mt : display;
                         Items.Add(new UsageRecord
                         {
                             Time = DateTime.TryParse(o["t"]?.GetValue<string>(), out var t) ? t : DateTime.Now,
+                            StartedAt = DateTime.TryParse(o["startedAt"]?.GetValue<string>(), null, DateTimeStyles.RoundtripKind, out var startedAt) ? startedAt : null,
+                            SessionId = o["sessionId"]?.GetValue<string>() ?? "",
                             Route = o["r"]?.GetValue<string>() ?? "",
-                            Model = o["m"]?.GetValue<string>() ?? "",
+                            Model = display,
+                            Target = real,
                             Prompt = o["p"]?.GetValue<long>() ?? 0,
                             Completion = o["c"]?.GetValue<long>() ?? 0,
                             CacheRead = o["cr"]?.GetValue<long>() ?? 0,
@@ -114,14 +126,23 @@ public static class UsageStats
         }
     }
 
-    public static void Record(string route, string model, long prompt, long completion,
-                              long cacheRead, long cacheWrite, long ms, int status)
+    /// <param name="model">展示名：模型映射名（客户端填的别名）。</param>
+    /// <param name="target">真实名：发给上游的模型名，计价用它。为空时退化成展示名。</param>
+    public static void Record(string route, string model, string target, long prompt, long completion,
+                              long cacheRead, long cacheWrite, long ms, int status,
+                              string sessionId = "", DateTime? startedAt = null)
     {
+        var display = string.IsNullOrWhiteSpace(model) ? (target ?? "") : model;
+        var real = string.IsNullOrWhiteSpace(target) ? display : target;
+
         var record = new UsageRecord
         {
             Time = DateTime.Now,
+            StartedAt = startedAt,
+            SessionId = string.IsNullOrWhiteSpace(sessionId) ? "" : sessionId,
             Route = route ?? "",
-            Model = model ?? "",
+            Model = display,
+            Target = real,
             Prompt = Math.Max(0, prompt),
             Completion = Math.Max(0, completion),
             CacheRead = Math.Max(0, cacheRead),
@@ -141,8 +162,12 @@ public static class UsageStats
             var line = new JsonObject
             {
                 ["t"] = record.Time.ToString("yyyy-MM-dd HH:mm:ss"),
+                ["startedAt"] = record.StartedAt?.ToString("O"),
+                ["sessionId"] = record.SessionId,
                 ["r"] = record.Route,
                 ["m"] = record.Model,
+                // 真实名单独一列：界面按映射名分组，计价仍按真实名匹配价格表，两者互不影响
+                ["mt"] = record.Target,
                 ["p"] = record.Prompt,
                 ["c"] = record.Completion,
                 ["cr"] = record.CacheRead,
@@ -179,23 +204,18 @@ public static class UsageStats
 
         if (by == UsageGroup.Session)
         {
-            items = items.OrderBy(i => i.Time).ToList();
-            var rows = new List<UsageRow>();
-            var bucket = new List<UsageRecord>();
-            DateTime? last = null;
-
-            foreach (var item in items)
-            {
-                if (last is not null && (item.Time - last.Value).TotalMinutes > 5)
+            return items
+                .GroupBy(i => string.IsNullOrWhiteSpace(i.SessionId) ? "" : i.SessionId, StringComparer.Ordinal)
+                .Select(g =>
                 {
-                    rows.Add(BuildRow($"会话 · {bucket[0].Time:HH:mm}", bucket, cfg));
-                    bucket = new List<UsageRecord>();
-                }
-                bucket.Add(item);
-                last = item.Time;
-            }
-            if (bucket.Count > 0) rows.Add(BuildRow($"会话 · {bucket[0].Time:HH:mm}", bucket, cfg));
-            return rows.OrderByDescending(r => r.Cost).ThenByDescending(r => r.Prompt).ToList();
+                    var first = g.Min(i => i.StartedAt);
+                    var key = g.Key.Length == 0
+                        ? "未识别会话"
+                        : $"{(first is null ? "发起时间未知" : first.Value.ToString("yyyy-MM-dd HH:mm:ss"))} · {g.Key}";
+                    return BuildRow(key, g.ToList(), cfg, first?.Ticks ?? 0);
+                })
+                .OrderByDescending(r => r.Order)
+                .ToList();
         }
 
         var groups = items.GroupBy(i => by == UsageGroup.Model
@@ -222,8 +242,9 @@ public static class UsageStats
     private static UsageRow BuildRow(string key, List<UsageRecord> items, AppConfig cfg, long order = 0)
     {
         decimal cost = 0;
+        // 计价只认真实名（价格表配的是上游真实模型名）；分组键另有其人
         foreach (var item in items)
-            cost += Pricing.Cost(cfg, item.Route, item.Model, item.Prompt, item.Completion,
+            cost += Pricing.Cost(cfg, item.Route, item.Target, item.Prompt, item.Completion,
                                  item.CacheRead, item.CacheWrite, item.Time);
 
         return new UsageRow
@@ -242,7 +263,7 @@ public static class UsageStats
         var items = Snapshot();
         decimal cost = 0;
         foreach (var item in items)
-            cost += Pricing.Cost(cfg, item.Route, item.Model, item.Prompt, item.Completion,
+            cost += Pricing.Cost(cfg, item.Route, item.Target, item.Prompt, item.Completion,
                                  item.CacheRead, item.CacheWrite, item.Time);
 
         return new UsageSummary(
@@ -254,9 +275,12 @@ public static class UsageStats
             cost);
     }
 
-    /// <summary>用量里出现过的模型名，供价格导入时筛选</summary>
+    /// <summary>
+    /// 用量里出现过的模型名，供价格导入与「从用量补充模型库」用 —— 给的是**真实名**，
+    /// 因为价格表与模型库配的都是发给上游的真实模型名，不是映射别名。
+    /// </summary>
     public static List<string> KnownModels()
-        => Snapshot().Select(i => i.Model)
+        => Snapshot().Select(i => string.IsNullOrWhiteSpace(i.Target) ? i.Model : i.Target)
             .Where(m => !string.IsNullOrWhiteSpace(m))
             .Distinct(StringComparer.Ordinal)
             .ToList();
@@ -353,7 +377,7 @@ public static class Pricing
         var rule = Resolve(cfg, route, model, prompt, at);
         if (rule is null) return 0;
 
-        var uncachedInput = Math.Max(0, prompt - cacheRead);
+        var uncachedInput = Math.Max(0, prompt - cacheRead - cacheWrite);
         var cost = uncachedInput / 1_000_000.0 * rule.InputPerM
                    + cacheRead / 1_000_000.0 * rule.CacheReadPerM
                    + cacheWrite / 1_000_000.0 * rule.CacheWritePerM

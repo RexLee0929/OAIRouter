@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Windows;
+using OAIRouter.Ui;
 using System.Windows.Controls;
 
 namespace OAIRouter;
@@ -67,12 +68,8 @@ public partial class PriceSyncWindow : Window
 
         ResultItems.ItemsSource = _results;
         Loaded += (_, _) => OnSourceChanged(null!, null!);
-    }
 
-    protected override void OnSourceInitialized(EventArgs e)
-    {
-        base.OnSourceInitialized(e);
-        WindowChrome.Apply(this);
+        ToolWindow.Attach(this);
     }
 
     private void OnSourceChanged(object sender, SelectionChangedEventArgs e)

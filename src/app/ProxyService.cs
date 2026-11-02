@@ -162,6 +162,9 @@ public sealed class ProxyService
         if (!ctx.Request.Headers.ContainsKey("Authorization"))
             LogStore.Instance.Warn("请求", $"{route.Prefix}{rest} 未携带 Authorization 头（客户端的 API Key 可能为空）");
 
+        var startedAt = DateTime.Now;
+        // WorkBuddy 模型请求携带对话 ID。仅用作本地统计，不转发给上游。
+        var conversationId = ReadConversationId(ctx);
         var sw = Stopwatch.StartNew();
         Interlocked.Increment(ref TotalRequests);
 
@@ -171,16 +174,21 @@ public sealed class ProxyService
         var failed = false;
         var cancelled = false;
 
-        // 请求体只读一次：既要拿模型名决定用哪种模式，后面还要转发
-        var payload = isChat ? await ReadBodyAsync(ctx) : null;
-        var requestModel = payload is { Length: > 0 } ? ReadModel(payload) : "";
-        var mode = ResolveMode(cfg, requestModel, route);
-
         try
         {
+            // JSON 请求体只读一次；其他格式（例如文件上传）保持原样透传。
+            var contentType = ctx.Request.ContentType ?? "";
+            var isJson = isChat || contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)
+                || contentType.Split(';')[0].Trim().EndsWith("+json", StringComparison.OrdinalIgnoreCase);
+            var payload = isJson ? await ReadBodyAsync(ctx) : null;
+            var requestModel = payload is { Length: > 0 } ? ReadModel(payload) : "";
+            var mode = ResolveMode(cfg, requestModel, route);
+            alias = requestModel;
+            target = ResolveModel(cfg, alias);
+
             if (isChat && string.Equals(mode, "responses", StringComparison.OrdinalIgnoreCase))
             {
-                (alias, target, usage) = await TranslateChatAsync(ctx, cfg, route, payload ?? Array.Empty<byte>());
+                (alias, target, usage, failed) = await TranslateChatAsync(ctx, cfg, route, payload ?? Array.Empty<byte>());
             }
             else if (isChat && string.Equals(mode, "rewrite", StringComparison.OrdinalIgnoreCase))
             {
@@ -194,11 +202,11 @@ public sealed class ProxyService
             {
                 alias = requestModel;
                 target = ResolveModel(cfg, alias);
-                var forwarded = ApplyModelMapping(payload ?? Array.Empty<byte>(), target);
+                var forwarded = payload is null ? null : ApplyModelMapping(payload, target);
                 (_, _, usage) = await PassthroughAsync(ctx, route, rest, forwarded, target);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
         {
             cancelled = true;
             LogStore.Instance.Info("转发", $"{route.Prefix} 客户端已断开（不算上游失败）");
@@ -207,7 +215,12 @@ public sealed class ProxyService
         {
             failed = true;
             LogStore.Instance.Error("转发", $"{route.Prefix} {ex.GetType().Name}: {ex.Message}");
-            if (!ctx.Response.HasStarted)
+            if (ctx.Response.HasStarted)
+            {
+                // 流已开始时无法改状态码；主动中止，避免客户端误以为响应完整。
+                ctx.Abort();
+            }
+            else
             {
                 ctx.Response.StatusCode = 502;
                 ctx.Response.ContentType = "application/json; charset=utf-8";
@@ -227,13 +240,13 @@ public sealed class ProxyService
             if (status >= 400 && status != 499) Interlocked.Increment(ref FailedRequests);
 
             LogStore.Instance.Request(route.Prefix, alias, target, status, sw.ElapsedMilliseconds);
-            RecordUsage(route.Prefix, string.IsNullOrWhiteSpace(target) ? alias : target,
-                        usage, sw.ElapsedMilliseconds, status);
+            // 展示名用映射名（alias），计价用真实名（target）——两列分开存，别把不同上游混在一起
+            RecordUsage(route.Prefix, alias, target, usage, sw.ElapsedMilliseconds, status, conversationId, startedAt);
         }
     }
 
     /// <summary>Chat Completions → Responses API 翻译转发</summary>
-    private async Task<(string alias, string target, JsonObject? usage)> TranslateChatAsync(HttpContext ctx, AppConfig cfg, RouteRule route, byte[] bodyBytes)
+    private async Task<(string alias, string target, JsonObject? usage, bool failed)> TranslateChatAsync(HttpContext ctx, AppConfig cfg, RouteRule route, byte[] bodyBytes)
     {
         var raw = Encoding.UTF8.GetString(bodyBytes);
 
@@ -243,9 +256,9 @@ public sealed class ProxyService
         {
             ctx.Response.StatusCode = 400;
             await ctx.Response.WriteAsync("{\"error\":{\"message\":\"请求体不是合法 JSON\"}}");
-            return ("", "", null);
+            return ("", "", null, false);
         }
-        if (chat is null) { ctx.Response.StatusCode = 400; return ("", "", null); }
+        if (chat is null) { ctx.Response.StatusCode = 400; return ("", "", null, false); }
 
         var alias = chat["model"]?.GetValue<string>() ?? "";
         var target = ResolveModel(cfg, alias);
@@ -270,14 +283,16 @@ public sealed class ProxyService
                 },
             }.ToJsonString());
             LogStore.Instance.Error("翻译", $"转换失败：{ex.GetType().Name} {ex.Message}");
-            return (alias, target, null);
+            return (alias, target, null, false);
         }
         var url = Combine(route.Upstream, "/v1/responses");
 
         var resp = await SendResponsesAsync(ctx, url, body);
+        try
+        {
         var status = (int)resp.StatusCode;
 
-        // 该模型不支持 reasoning：去掉后重试一次，并记住它，别影响其他模型
+        // 该模型不支持 reasoning：只对本次请求去掉后重试一次
         if (status == 400 && body.ContainsKey("reasoning"))
         {
             var probe = await resp.Content.ReadAsStringAsync(ctx.RequestAborted);
@@ -298,13 +313,15 @@ public sealed class ProxyService
                 var why = UpstreamError.Explain(probe);
                 LogStore.Instance.Warn("上游", $"{route.Prefix} 拒绝：{(why.Length > 0 ? why + " ｜ 原文：" : "")}{Truncate(probe, 120)}");
                 resp.Dispose();
-                return (alias, target, null);
+                return (alias, target, null, false);
             }
         }
 
         if (status != 200)
         {
             var err = await resp.Content.ReadAsStringAsync(ctx.RequestAborted);
+            if (status == 524)
+                LogStore.Instance.Warn("上游", $"{route.Prefix} 返回 524：上游网关等待后端超时，请联系上游服务商排查");
             ctx.Response.StatusCode = status;
             ctx.Response.ContentType = "application/json; charset=utf-8";
             await ctx.Response.WriteAsync(err);
@@ -315,7 +332,7 @@ public sealed class ProxyService
                 : Truncate(err, 160);
             LogStore.Instance.Warn("上游", $"{route.Prefix} 拒绝：{detail}");
             resp.Dispose();
-            return (alias, target, null);
+            return (alias, target, null, false);
         }
 
         if (stream)
@@ -334,14 +351,17 @@ public sealed class ProxyService
             });
 
             await using var up = await resp.Content.ReadAsStreamAsync(ctx.RequestAborted);
-            var buffer = new byte[8192];
+            using var reader = new StreamReader(up, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 8192, leaveOpen: true);
+            var buffer = new char[8192];
             int read;
-            while ((read = await up.ReadAsync(buffer, ctx.RequestAborted)) > 0)
-                await translator.FeedAsync(Encoding.UTF8.GetString(buffer, 0, read));
+            while ((read = await reader.ReadAsync(buffer.AsMemory(), ctx.RequestAborted)) > 0)
+                await translator.FeedAsync(new string(buffer, 0, read));
 
             await translator.EndAsync();
+            if (translator.Failed)
+                LogStore.Instance.Warn("上游", $"{route.Prefix} 流式响应失败或提前中断");
             resp.Dispose();
-            return (alias, target, translator.Usage);
+            return (alias, target, translator.Usage, translator.Failed);
         }
         else
         {
@@ -356,7 +376,12 @@ public sealed class ProxyService
             ctx.Response.ContentType = "application/json; charset=utf-8";
             await ctx.Response.WriteAsync(outJson);
             resp.Dispose();
-            return (alias, target, parsed?["usage"] as JsonObject);
+            return (alias, target, parsed?["usage"] as JsonObject, false);
+        }
+        }
+        finally
+        {
+            resp.Dispose();
         }
     }
 
@@ -370,7 +395,7 @@ public sealed class ProxyService
         using var req = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), url);
         var payload = Array.Empty<byte>();
 
-        if (bodyOverride is not null || ctx.Request.ContentLength > 0 || HttpMethods.IsPost(ctx.Request.Method))
+        if (bodyOverride is not null || ctx.Request.ContentLength > 0 || ctx.Request.Headers.ContainsKey("Transfer-Encoding") || HttpMethods.IsPost(ctx.Request.Method))
         {
             payload = bodyOverride ?? await ReadBodyAsync(ctx);
             if (payload.Length > 0)
@@ -395,6 +420,11 @@ public sealed class ProxyService
         foreach (var h in resp.Content.Headers)
             if (h.Key is not ("Transfer-Encoding" or "Content-Length"))
                 ctx.Response.Headers[h.Key] = h.Value.ToArray();
+        if (resp.Content.Headers.ContentType?.MediaType?.Equals("text/event-stream", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            ctx.Response.Headers.CacheControl = "no-cache";
+            ctx.Response.Headers["X-Accel-Buffering"] = "no";
+        }
 
         await using var up = await resp.Content.ReadAsStreamAsync(ctx.RequestAborted);
         var sniffer = new UsageSniffer();
@@ -414,7 +444,8 @@ public sealed class ProxyService
             var hint = bare
                 ? "（请求落在了裸路径上：如果客户端开了「自定义协议」，它不会自动补 /chat/completions，请关掉该选项）"
                 : "";
-            LogStore.Instance.Warn("上游", $"{route.Prefix}{rest} → {(int)resp.StatusCode}{hint}");
+            var timeoutHint = (int)resp.StatusCode == 524 ? "（上游网关等待后端超时，请联系上游服务商排查）" : "";
+            LogStore.Instance.Warn("上游", $"{route.Prefix}{rest} → {(int)resp.StatusCode}{hint}{timeoutHint}");
         }
 
         return (model ?? "", model ?? "", returnUsage);
@@ -519,10 +550,23 @@ public sealed class ProxyService
                && (t.Contains("not supported") || t.Contains("unsupported"));
     }
 
-    /// <summary>把 usage 记进统计。兼容 Responses（input/output）与 Chat（prompt/completion）两种形状。</summary>
-    private static void RecordUsage(string route, string model, JsonObject? usage, long ms, int status)
+    private static string ReadConversationId(HttpContext ctx)
     {
-        if (usage is null) { UsageStats.Record(route, model, 0, 0, 0, 0, ms, status); return; }
+        // 禁止把每次请求都变的 request/message ID 冒充会话 ID。
+        if (!ctx.Request.Headers.TryGetValue("X-Conversation-ID", out var values) || values.Count != 1)
+            return "";
+        var value = values[0]?.Trim() ?? "";
+        return Guid.TryParseExact(value, "D", out var id) || Guid.TryParseExact(value, "N", out id)
+            ? id.ToString("D") : "";
+    }
+
+    /// <summary>把 usage 记进统计。兼容 Responses（input/output）与 Chat（prompt/completion）两种形状。</summary>
+    /// <param name="model">展示名：映射名（客户端填的别名），界面按它分组。</param>
+    /// <param name="target">真实名：发给上游的模型名，计价用它。</param>
+    private static void RecordUsage(string route, string model, string target, JsonObject? usage, long ms, int status,
+                                    string conversationId, DateTime startedAt)
+    {
+        if (usage is null) { UsageStats.Record(route, model, target, 0, 0, 0, 0, ms, status, conversationId, startedAt); return; }
 
         var prompt = usage["input_tokens"]?.GetValue<long?>()
                      ?? usage["prompt_tokens"]?.GetValue<long?>() ?? 0;
@@ -539,7 +583,7 @@ public sealed class ProxyService
         var cacheWrite = details?["cache_write_tokens"]?.GetValue<long?>()
                          ?? usage["cache_creation_input_tokens"]?.GetValue<long?>() ?? 0;
 
-        UsageStats.Record(route, model, prompt, completion, cacheRead, cacheWrite, ms, status);
+        UsageStats.Record(route, model, target, prompt, completion, cacheRead, cacheWrite, ms, status, conversationId, startedAt);
     }
 
     private static void CopyAuth(HttpContext ctx, HttpRequestMessage req)

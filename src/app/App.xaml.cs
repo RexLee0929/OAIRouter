@@ -1,6 +1,5 @@
 using System.IO;
-using System.Security.Cryptography;
-using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -20,10 +19,18 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        var iconTestExitCode = DebugTools.TryRunIconTest(e.Args);
+        if (iconTestExitCode.HasValue)
+        {
+            Current.Shutdown(iconTestExitCode.Value);
+            return;
+        }
+
         Accent.Init();
         Resources["AccentBrush"] = Accent.MainBrush;
         Resources["AccentDarkBrush"] = Accent.DarkBrush;
         Resources["AccentSoftBrush"] = Accent.SoftBrush;
+        // 悬停浅档：GhostButton / 菜单子项 / 下拉条目的 IsMouseOver 都吃这一支（§十三.2）
         Resources["AccentHoverBrush"] = Accent.HoverBrush;
 
         Config = ConfigStore.Load();
@@ -60,7 +67,10 @@ public partial class App : Application
         DispatcherUnhandledException += OnUnhandled;
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
-            if (args.ExceptionObject is Exception ex) WriteCrash(ex);
+            if (args.ExceptionObject is not Exception ex) return;
+            WriteCrash(ex);
+            // 非 UI 线程上的崩溃：能派发就派发，派发不了至少日志已经落下
+            try { Dispatcher.BeginInvoke(() => Shell?.ReportError(ex)); } catch { }
         };
 
         LogStore.Instance.Info("启动", $"{Brand.Name} {Brand.Version}");
@@ -73,37 +83,57 @@ public partial class App : Application
 
         // 托盘模式也要 Show 一次：否则 Loaded 不触发，服务不会启动、窗口句柄也不存在
         Shell.Show();
+
+        // 调试命令统一入口（--render / --shotreal / --shotwin / --dialogs），正常启动不会命中
+        var debugExitCode = DebugTools.TryRun(e.Args);
+        if (debugExitCode.HasValue)
+        {
+            Current.Shutdown(debugExitCode.Value);
+            return;
+        }
+
+
     }
 
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        WriteCrash(e.Exception);
+        WriteCrash(e.Exception);                        // ① error.log
         LogStore.Instance.Error("崩溃", e.Exception.Message);
-        Shell?.ShowToast($"程序出错：{e.Exception.Message}");
+        Shell?.ReportError(e.Exception);                // ② 状态栏红字 ③ 自绘错误框
         e.Handled = true;
     }
+
+    /// <summary>崩溃日志的唯一落点。错误框的「打开日志」也指这里。</summary>
+    public static string LogPath => Path.Combine(ConfigStore.Dir, "error.log");
 
     private static void WriteCrash(Exception ex)
     {
         try
         {
-            var path = Path.Combine(ConfigStore.Dir, "error.log");
-            File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
+            File.AppendAllText(LogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
         }
         catch { }
     }
 
-    /// <summary>按程序所在目录散列命名，免安装版与安装版可各跑一个。</summary>
-    private static string InstanceName()
-    {
-        var dir = AppContext.BaseDirectory;
-        var hash = MD5.HashData(Encoding.UTF8.GetBytes(dir));
-        return $"{Brand.Name}.{Convert.ToHexString(hash)[..8]}";
-    }
+    /// <summary>
+    /// 单实例锁名。原来是「程序名 + exe 目录散列」，免安装版与安装版各拿一把锁，
+    /// 可以同时跑两个进程（端口还会冲突）——使用者把它当多开的 bug 报上来。
+    /// 现在全局唯一：哪个副本先跑，后启动的都只负责把它的窗口唤到前台。
+    /// </summary>
+    private static string InstanceName() => Brand.Name;
 
     protected override void OnExit(ExitEventArgs e)
     {
-        try { Proxy.StopAsync().GetAwaiter().GetResult(); } catch { }
+        // 服务是在 UI 线程上启动的，Kestrel 停止链路里有续延要回到 UI 线程；
+        // 在这里用 GetResult() 阻塞 UI 线程就是永久死锁——实测复现过（进程退不掉）。
+        // 挪到后台线程等，且最多等 8 秒：超时就放行，进程退出时框架自会拆掉监听。
+        try
+        {
+            var stop = Task.Run(() => Proxy.StopAsync());
+            if (!stop.Wait(TimeSpan.FromSeconds(8)))
+                LogStore.Instance.Warn("服务", "停止超时，跳过等待直接退出");
+        }
+        catch { }
         _wake?.Dispose();
         _mutex?.Dispose();
         base.OnExit(e);

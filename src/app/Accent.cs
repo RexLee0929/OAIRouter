@@ -25,8 +25,11 @@ public static class Accent
 
     public static void Init()
     {
-        // 淡蓝主题：明度比规范默认值（.245）提高，避免派生成深藏青；
-        // 白字在主按钮上仍有足够对比度。
+        // 淡蓝主题。§三 的常量按本主题调整过，属**有意的、已记录的偏离**，
+        // 不是适配残留：
+        //   Main/Dark 明度 .42/.33（规范 .245/.175）—— 规范值会派生成深藏青，与淡蓝主题冲突
+        //   Soft/Hover 饱和度 .45/.40（规范 .32/.28）—— 淡底需要更明显的一点色相
+        // 换图标只改种子色，这四个常量保持不变。
         var (h, s) = ReadIconSeed();
         Main = FromHsl(h, Math.Min(s * 1.05, 0.95), 0.42);
         Dark = FromHsl(h, Math.Min(s * 1.10, 0.95), 0.33);
@@ -53,10 +56,13 @@ public static class Accent
     {
         try
         {
-            var res = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/app.ico"));
+            var res = System.Windows.Application.GetResourceStream(new Uri(BrandIcon.Uri));
             if (res?.Stream is null) return Fallback();
 
-            using var ico = new System.Drawing.Icon(res.Stream, 64, 64);
+            // 取最大帧采样：小帧的抗锯齿边缘会污染色相统计
+            var frameSize = IconUtil.LargestSize(res.Stream);
+            res.Stream.Position = 0;
+            using var ico = new System.Drawing.Icon(res.Stream, frameSize, frameSize);
             using var bmp = ico.ToBitmap();
 
             var buckets = new Dictionary<(int, int, int), (int count, double hx, double sx)>();

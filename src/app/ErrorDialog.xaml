@@ -1,0 +1,11 @@
+<ui:DialogWindow x:Class="OAIRouter.ErrorDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:OAIRouter.Ui"
+        Height="180" MinHeight="160">
+    <!-- 说明类对话框（规范 §七.2）：宽高都按这个框自己的文案拟合
+         （ErrorDialog.MeasureContent 量标题与正文里最长的一行）。
+         未捕获异常只剩这一档才弹（§七 阶梯的第 ⑤ 级），其余反馈走状态栏 / 行内提示。 -->
+    <ui:DialogShell x:Name="Shell" Style="{StaticResource DialogShell}"
+                    Kind="Danger" PrimaryText="打开日志" SecondaryText="关闭" />
+</ui:DialogWindow>

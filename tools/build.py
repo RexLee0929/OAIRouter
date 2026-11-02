@@ -55,13 +55,19 @@ VERSION = read_version()
 # 且安装器 exe 本身就是发布产物，不再打 zip/7z 包
 SETUP_EXE = f"OAIRouter-{VERSION}-setup.exe"
 SKIP_EXT = {".pdb", ".xml", ".zip"}
-# 运行时产生的文件绝不能进安装包：会把开发者本机的数据带给用户
-# （OAIRouter 的 publish 产物只有 exe 与 pdb，这里是兜底）
+# 运行时产生的文件绝不能进安装包：会把开发者本机的数据带给用户。
+# OAIRouter 运行后可能在发布目录旁生成 backups/、logs/，也必须整目录排除。
 SKIP_NAMES = {"config.json", "error.log", "usage.jsonl"}
+SKIP_DIRS = {"backups", "logs"}
 
 
 def wanted(p: Path) -> bool:
-    return p.is_file() and p.suffix.lower() not in SKIP_EXT and p.name.lower() not in SKIP_NAMES
+    return (
+        p.is_file()
+        and p.suffix.lower() not in SKIP_EXT
+        and p.name.lower() not in SKIP_NAMES
+        and not any(part.lower() in SKIP_DIRS for part in p.parts)
+    )
 
 
 def run(cmd: list[str], cwd: Path) -> bool:
@@ -103,13 +109,28 @@ def make_payload() -> int:
         for p in sorted(files):
             z.write(p, p.relative_to(APP_OUT).as_posix())
 
+    # Fail closed: audit the actual archive, not only the source-file filter.
+    # This app is published as one self-contained executable; any additional entry
+    # (especially config/backups/logs/usage) is unexpected and must stop packaging.
+    with zipfile.ZipFile(PAYLOAD, "r") as z:
+        names = z.namelist()
+    expected = ["OAIRouter.exe"]
+    if names != expected:
+        print(f"× payload 内容不符合单文件白名单，已拒绝继续构建: {names}")
+        PAYLOAD.unlink(missing_ok=True)
+        return 0
+
     kb = PAYLOAD.stat().st_size / 1024
     print(f"payload.zip  {len(files)} 个文件  {kb:.0f} KB")
     return len(files)
 
 
-def artifact_list() -> list[tuple[Path, Path]]:
-    """(源绝对路径, 目标相对路径)"""
+def artifact_list(with_installer: bool = True) -> list[tuple[Path, Path]]:
+    """(源绝对路径, 目标相对路径)
+
+    with_installer=False 时绝不带安装包：SETUP_OUT 里可能还躺着上一次编的旧 exe，
+    顺手复制过去就等于把旧代码当新版本发出去。
+    """
     pairs: list[tuple[Path, Path]] = []
     if APP_OUT.is_dir():
         for p in APP_OUT.rglob("*"):
@@ -117,7 +138,7 @@ def artifact_list() -> list[tuple[Path, Path]]:
                 continue
             pairs.append((p, p.relative_to(APP_OUT)))
     setup = SETUP_OUT / SETUP_EXE
-    if setup.is_file():
+    if with_installer and setup.is_file():
         pairs.append((setup, Path(SETUP_EXE)))
     return pairs
 
@@ -138,38 +159,50 @@ def main() -> int:
                 shutil.rmtree(d, ignore_errors=True)
                 print(f"清理 {d.relative_to(ROOT)}")
 
-    print("=" * 64)
-    print("[1/3] 编译主程序（自包含单文件 publish）")
+    print("=" * 64, flush=True)
+    print("[1/4] 源码扫黑（规范 §七 硬禁止：系统框 / 提示音 / 网页原生框）", flush=True)
+    rc = subprocess.run([sys.executable, str(HERE / "no_system_popup.py")])
+    if rc.returncode != 0:
+        print("× 扫黑未通过，编译中止（规则见 tools/no_system_popup.py）")
+        return 1
+
+    print("[2/4] 编译主程序（自包含单文件 publish）")
     if not run(["dotnet", "publish", "-c", "Release"], APP_DIR):
         return 1
 
-    print("[2/3] 打包 payload.zip")
+    print("[3/4] 打包 payload.zip")
     n = make_payload()
     if n == 0:
         return 1
 
     if not args.no_installer:
-        print("[3/3] 编译安装器")
+        print("[4/4] 编译安装器")
         if not run(["dotnet", "build", "-c", "Release", "-v", "m"], SETUP_DIR):
             return 1
     else:
-        print("[3/3] 跳过安装器")
+        print("[4/4] 跳过安装器")
 
-    pairs = artifact_list()
+    pairs = artifact_list(with_installer=not args.no_installer)
     print("-" * 64)
     print(f"产物 {len(pairs)} 个：")
     for src, rel in pairs:
         print(f"  {rel.as_posix():<44} {src.stat().st_size / 1024:>8.0f} KB")
 
-    # 产物统一复制进 artifacts/：整目录重建，旧版本的安装器不会残留
-    if ARTIFACTS.is_dir():
-        shutil.rmtree(ARTIFACTS, ignore_errors=True)
+    # artifacts/ 同时可能包含运行数据（config/backups/logs/usage），不能整目录删除。
+    # 仅更新本次生成的发布文件，保留目录中其余用户/运行时数据。
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    copy_errors = 0
     for src, rel in pairs:
         dst = ARTIFACTS / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    print(f"已复制到 {ARTIFACTS}")
+        try:
+            shutil.copy2(src, dst)
+        except PermissionError as exc:
+            # 主程序若正被运行中的 OAIRouter 占用，保留旧副本；安装器仍照常更新。
+            # 记录跳过项，避免误报主程序已更新。
+            copy_errors += 1
+            print(f"! 无法覆盖（文件可能正在使用），保留原文件: {dst} ({exc})")
+    print(f"已更新可写产物到 {ARTIFACTS}；跳过 {copy_errors} 个被占用文件")
 
     if not args.apply:
         print("-" * 64)

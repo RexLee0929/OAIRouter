@@ -1,6 +1,7 @@
 <Window x:Class="OAIRouter.PricingWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:OAIRouter.Ui"
         Title="价格设置"
         Width="1240" Height="640" MinWidth="1140" MinHeight="500"
         Background="#F2F6FB" FontFamily="Microsoft YaHei UI"

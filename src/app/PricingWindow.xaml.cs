@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using OAIRouter.Ui;
 
 namespace OAIRouter;
 
@@ -25,6 +26,8 @@ public partial class PricingWindow : Window
         foreach (var rule in _cfg.Pricing) rule.PropertyChanged += (_, _) => ConfigStore.Save(_cfg);
 
         Activated += (_, _) => ReloadOptions();
+
+        ToolWindow.Attach(this);
     }
 
     private void ReloadOptions()
@@ -41,12 +44,6 @@ public partial class PricingWindow : Window
         ModelOptions.Add("*");
         foreach (var model in _cfg.Models)
             if (!string.IsNullOrWhiteSpace(model) && !ModelOptions.Contains(model)) ModelOptions.Add(model);
-    }
-
-    protected override void OnSourceInitialized(EventArgs e)
-    {
-        base.OnSourceInitialized(e);
-        WindowChrome.Apply(this);
     }
 
     private void OnAdd(object sender, RoutedEventArgs e)

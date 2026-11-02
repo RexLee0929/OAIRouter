@@ -1,118 +1,145 @@
+using System.IO;
+using System.Text;
 using System.Windows;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using OAIRouter.Ui;
 
 namespace OAIRouter;
 
-public partial class AboutDialog : Window
+/// <summary>
+/// 「帮助 → 关于」。三段式（内容框 / 联系条 / 按钮栏），规范 §八 的样板：
+/// 原生标题栏 + 同一套配色与字体 + 可选中的富文本 + 高度随内容拟合。
+/// 文案全部在 src/app/ABOUT.md，这里只做占位符替换与渲染。
+/// </summary>
+public partial class AboutDialog : DialogWindow
 {
+    private static string? _aboutMd;
+
     private readonly DispatcherTimer _hintTimer = new() { Interval = TimeSpan.FromSeconds(1.6) };
 
     public AboutDialog()
     {
         InitializeComponent();
+
+        // 窗口标题写「关于 + 程序名」：程序名只有一个来源
+        Title = $"关于 {Brand.Name}";
+
+        // 高度上限放在窗口上，而不是给内容加 MaxHeight ——
+        // 否则内容一长就变成「小框里滚动」，而不是整窗变高
+        MaxHeight = Math.Max(320, SystemParameters.WorkArea.Height - 60);
+
         BuildDocument();
-        _hintTimer.Tick += (_, _) => { CopyHint.Text = ""; _hintTimer.Stop(); ResetPill(); };
+
+        _hintTimer.Tick += (_, _) =>
+        {
+            CopyHint.Text = "";
+            _hintTimer.Stop();
+            ResetPill();
+        };
     }
 
-    protected override void OnSourceInitialized(EventArgs e)
-    {
-        base.OnSourceInitialized(e);
-        WindowChrome.Apply(this);
-    }
+    /* ----------------------------- 内容 ----------------------------- */
 
     private void BuildDocument()
     {
-        var doc = new FlowDocument
-        {
-            FontFamily = new FontFamily("Microsoft YaHei UI"),
-            FontSize = 12,
-            Foreground = new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B)),
-            PagePadding = new Thickness(0),
-        };
+        var md = ReadAbout()
+            .Replace("{NAME}", Brand.Name)
+            .Replace("{VERSION}", Brand.Version)
+            .Replace("{AUTHOR}", Brand.Author)
+            .Replace("{TAGLINE}", Brand.Tagline);
 
-        var title = new Paragraph { Margin = new Thickness(0, 0, 0, 2) };
-        title.Inlines.Add(new Run(Brand.Name) { FontSize = 19, FontWeight = FontWeights.SemiBold });
-        title.Inlines.Add(new Run(" "));
-        title.Inlines.Add(new Run(Brand.Version) { FontSize = 19, FontWeight = FontWeights.SemiBold, Foreground = (Brush)FindResource("AccentBrush") });
-        doc.Blocks.Add(title);
+        Doc.Document = AboutDoc.Parse(md,
+            FindBrush("AccentBrush"), FindBrush("TextBrush"),
+            FindBrush("SubBrush"), FindBrush("HintBrush"));
 
-        doc.Blocks.Add(Para(Brand.Tagline, 12, 0x5C, 0x5C, 0x5C, 0));
-
-        doc.Blocks.Add(Para(
-            "把本机多个模型来源收拢到一个地址上：按路径前缀分流转发，按别名替换模型名，" +
-            "并在需要时把 Chat Completions 翻译成 Responses API，让工具调用与思考档位可以同时使用。",
-            12, 0x1B, 0x1B, 0x1B, 12));
-
-        doc.Blocks.Add(Head("主要功能"));
-        doc.Blocks.Add(Bullet("路径分流：/openai、/newapi 各自指向不同上游，互不干扰"));
-        doc.Blocks.Add(Bullet("模型映射：客户端填 aa，转发时替换为真实模型名"));
-        doc.Blocks.Add(Bullet("协议翻译：Chat Completions ⇄ Responses，工具与思考共存"));
-        doc.Blocks.Add(Bullet("运行日志：只记时间、路由、模型、状态码与耗时，不含密钥与对话内容"));
-        doc.Blocks.Add(Bullet("托盘常驻：可隐藏到托盘，关键事件静音通知"));
-
-        doc.Blocks.Add(Head("快捷键"));
-        doc.Blocks.Add(Para("Ctrl+C 复制监听地址　　Ctrl+L 清空日志　　Ctrl+Q 退出", 12, 0x1B, 0x1B, 0x1B, 12));
-
-        var footer = new Paragraph { Margin = new Thickness(0, 12, 0, 0), FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x8A, 0x8A)) };
-        footer.Inlines.Add(new Run("免费软件，依据 MIT License 分发。"));
-        footer.Inlines.Add(new LineBreak());
-        footer.Inlines.Add(new Run($"© 2026 {Brand.Author}　保留所有权利。"));
-        doc.Blocks.Add(footer);
-
-        Body.Document = doc;
+        // RichTextBox 会在文档挂上去之后的布局里把 PagePadding 复位成模板值 5,0,5,0，
+        // 正文于是整体右移 5px、和卡片左内边距对不齐。赋值时还没上屏，设一次不管用，
+        // 必须在 Loaded 之后补压，之后每轮高度拟合也顺手压一次。
+        Doc.Loaded += (_, _) => ZeroPadding();
+        ZeroPadding();
     }
 
-    private static Paragraph Para(string text, double size, byte r, byte g, byte b, double top)
-        => new(new Run(text))
-        {
-            FontSize = size,
-            Foreground = new SolidColorBrush(Color.FromRgb(r, g, b)),
-            Margin = new Thickness(0, top, 0, 0),
-        };
-
-    private static Paragraph Head(string text)
-        => new(new Run(text))
-        {
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 12, 0, 0),
-        };
-
-    private static Paragraph Bullet(string text)
+    private void ZeroPadding()
     {
-        var p = new Paragraph { Margin = new Thickness(31, 0, 0, 0), TextIndent = -9 };
-        p.Inlines.Add(new Run("•  "));
-        p.Inlines.Add(new Run(text));
-        return p;
+        if (Doc.Document is not null) Doc.Document.PagePadding = new Thickness(0);
     }
+
+    /// <summary>文案从 exe 内嵌的 ABOUT.md 读，不散落在 C# 里。</summary>
+    private static string ReadAbout()
+    {
+        if (_aboutMd is not null) return _aboutMd;
+
+        var asm = typeof(AboutDialog).Assembly;
+        using var stream = asm.GetManifestResourceStream($"{Brand.Name}.ABOUT.md");
+        if (stream is null) return _aboutMd = $"{Brand.Name} {Brand.Version}";
+
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return _aboutMd = reader.ReadToEnd();
+    }
+
+    /* ----------------------------- 宽度 ----------------------------- */
+
+    /// <summary>
+    /// 宽度按 ABOUT.md 里最宽的那一行算（规范 §七.2）。关于页是唯一一篇「一整篇文档」，
+    /// 所以量的是文档本身，而不是谁手抄的一份文案。
+    /// </summary>
+    protected override MeasuredLine MeasureContent()
+        => DialogMetrics.WidestDocumentLine(Doc.Document, Doc.FontFamily,
+            VisualTreeHelper.GetDpi(this).PixelsPerDip);
+
+    /// <summary>外边距 20×2 + 卡片内边距 14×2 + 卡片边框 1×2（AboutDialog.xaml 的三段式布局）。</summary>
+    protected override double HorizontalInset => 70;
+
+    /* ----------------------------- 高度拟合 ----------------------------- */
+
+    /// <summary>
+    /// 在基类「按内容量高」之后补一次差值校正：RichTextBox 的 DesiredSize 会偏小，
+    /// 溢出量只能从 ExtentHeight − ViewportHeight 读出来，把差值加回窗口高。
+    /// 只用差值不行 —— 它读不出「内容比窗口矮」，窗口就永远缩不回去。
+    /// </summary>
+    protected override void OnFitPass()
+    {
+        ZeroPadding();      // 布局过程会把它复位，每轮都补一次
+
+        if (Doc.ExtentHeight <= 0 || Doc.ViewportHeight <= 0) return;
+
+        var delta = Doc.ExtentHeight - Doc.ViewportHeight;
+        if (Math.Abs(delta) > 0.5) Apply(Math.Ceiling(ActualHeight + delta));
+    }
+
+    /* ----------------------------- 邮箱 ----------------------------- */
+
+    private static Brush FindBrush(string key)
+        => Application.Current.TryFindResource(key) as Brush ?? Brushes.DimGray;
 
     private void OnCopyEmail(object sender, MouseButtonEventArgs e)
     {
         try
         {
             Clipboard.SetText(Brand.Email);
-            MailPill.Background = (Brush)FindResource("AccentSoftBrush");
-            MailPill.BorderBrush = (Brush)FindResource("AccentBrush");
-            MailText.Foreground = (Brush)FindResource("AccentBrush");
+            MailPill.Background = FindBrush("AccentSoftBrush");
+            MailPill.BorderBrush = FindBrush("AccentBrush");
+            MailText.Foreground = FindBrush("AccentBrush");
             CopyHint.Text = "已复制到剪贴板";
-            _hintTimer.Stop();
-            _hintTimer.Start();
         }
         catch
         {
-            CopyHint.Text = "复制失败";
-            _hintTimer.Stop();
-            _hintTimer.Start();
+            CopyHint.Foreground = FindBrush("HintBrush");
+            CopyHint.Text = "复制失败，请手动选中邮箱文字复制";
         }
+
+        _hintTimer.Stop();
+        _hintTimer.Start();
     }
 
     private void ResetPill()
     {
-        MailPill.Background = Brushes.White;
-        MailPill.BorderBrush = new SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF1));
-        MailText.Foreground = new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B));
+        MailPill.Background = FindBrush("CardBrush");
+        MailPill.BorderBrush = FindBrush("LineBrush");
+        MailText.Foreground = FindBrush("TextBrush");
+        CopyHint.Foreground = FindBrush("AccentBrush");
     }
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();

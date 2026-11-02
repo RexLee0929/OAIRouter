@@ -13,18 +13,14 @@
 ### 脚本
 
 ```bash
-python tools/build.py                # 预演：只打印会做什么
-python tools/build.py --apply        # 构建 + 同步发布区
+python tools/build.py                # 构建并更新 artifacts/，不改发布区
+python tools/build.py --apply        # 构建后同步发布区（含 --prune）
 python tools/build.py --apply --clean --no-installer   # 可选参数
 ```
 
-流程三步：
+流程先运行源码扫黑，再发布主程序、打包 `src/installer/payload.zip`、构建安装器。打包排除运行数据，并检查压缩包只含 `OAIRouter.exe`；`--no-installer` 跳过安装器构建及其复制。`--clean` 会先删除主程序和安装器的 `bin/obj`。
 
-1. `dotnet publish -c Release` 主程序（自包含单文件，产物在 `src/app/bin/Release/net10.0-windows/win-x64/publish/`）
-2. 把产物打包成 `src/installer/payload.zip`（排除 `config.json` / `error.log` / `usage.jsonl`，开发机的数据绝不带给用户）
-3. `dotnet build -c Release` 安装器，产物 `OAIRouter-<版本>-setup.exe`
-
-所有产物统一复制到项目根 `artifacts/`（整目录重建）。
+默认构建会写入编译目录、payload 和项目根 `artifacts/`，不是预演。`artifacts/` 只更新本次产物，不删除其余文件；被占用文件会跳过并提示。只有 `sync_to_code.py` 默认预演；`build.py --apply` 构建后调用它并带 `--prune`。
 
 ### 手工分步
 
@@ -68,18 +64,18 @@ src/
     MainWindow.*      主界面（服务、统计、路由、映射、日志五块）
     AppMenu.cs        菜单数据（五菜单，图标为内联 Path）
     Config.cs         配置模型与存取（config.json、启动备份 10 份、种子数据）
-    UsageStats.cs     用量记录（usage.jsonl，2 万条上限）与计价引擎
+    UsageStats.cs     用量记录（内存最近 2 万条，usage.jsonl 追加）与计价引擎
     PricingWindow.*   价格表编辑（分挡 / 时段 / 有效期）
     PriceSyncWindow.* 价格同步（new-api / LiteLLM / 自定义 JSON）
-    ModelsWindow.*    模型库管理（本地增删、从用量补充、恢复默认）
+    ModelsWindow.*    模型库管理（本地增删、从用量导入、恢复默认）
     ImportWindow.*    配置导入（五类勾选）
     Accent.cs         强调色：从 app.ico 主色派生
     Brand.cs          品牌常量：名称、标语、作者、邮箱、版本
     Autostart.cs      开机自启（HKCU Run 键，"exe" --tray）
-    LogStore.cs       日志（内存列表 + logs\app.log，2 MB 轮转，密钥打码）
+    LogStore.cs       日志（内存列表 + logs\app.log，2 MB 轮转，特定 sk- 格式脱敏）
     UpstreamError.cs  上游英文报错离线翻译成中文（15 条正则）
     TrayMenu.cs       自绘托盘右键菜单
-    Toast / ConfirmDialog / AboutDialog   自绘通知 / 确认框 / 关于
+    Toast / ErrorDialog / AboutDialog   自绘通知 / 错误框 / 关于；确认交互见 Ui/
     WindowChrome.cs   DWM 标题栏定制（圆角、边框与标题栏颜色）
   installer/        安装 / 卸载向导（WinForms，net48）
     WizardShell.cs    向导外壳（页面切换、按钮布局）
@@ -93,12 +89,22 @@ tools/
   build.py          构建入口（publish -> payload.zip -> 安装器 -> artifacts）
   sync_to_code.py   编辑区 -> 发布区单向同步（按哈希，默认预演）
   sync_icon.py      品牌图标搬运
-  shot_installer.py 安装器逐页截图（不点「安装」，不写磁盘）
+  shot_installer.py 安装器逐页截图（不点「安装」，截图写入输出目录）
 ```
 
 ## 界面怎么验证
 
-主窗口没有自动化截图工具，改动界面后手动跑一遍核心链路：启动服务 → 客户端发一条流式请求 → 看概览与用量 → 停止服务。
+### 图标渲染自检
+
+逐个运行当前程序图标表中的键，经真实 WPF `Icons.Get` 和 `RenderTargetBitmap` 离屏渲染，断言每个图标都有非透明墨迹；未知键会关闭兜底路径，避免 `arrow-right` 掩盖拼写错误。路径解析不抛异常但渲染为空白时也会失败，并返回非零退出码。
+
+```bash
+dotnet run --project src/app -c Release -- --test-icons
+```
+
+`--render <目录>` 也会先执行同一图标断言，再输出关于、导入、错误窗口截图。图标自检失败会返回退出码 1。
+
+主窗口核心链路仍需单独验证：启动服务 → 客户端发一条流式请求 → 看概览与用量 → 停止服务。
 
 安装器界面用离屏截图确认：
 
@@ -106,7 +112,7 @@ tools/
 python tools/shot_installer.py artifacts/OAIRouter-<版本>-setup.exe <输出目录> <标签>
 ```
 
-逐页点「下一步」抓 6 页截图，**不点「安装」、不写磁盘**，可以放心对未发布的包跑。
+逐页点「下一步」抓 6 页截图，不点「安装」；截图会写入指定输出目录。
 
 ## 坑
 

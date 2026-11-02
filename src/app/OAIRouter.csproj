@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- 版本与作者信息的唯一来源（规范 §一 / §十三.8）：主程序和安装器都从这里 Import，
+       改版本只改 src/version.props 一处。csproj 里不许再写 <Version> 字面量。 -->
   <Import Project="..\version.props" />
 
   <PropertyGroup>
@@ -19,6 +21,9 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- WinForms 分析器建议用 ApplicationHighDpiMode 代替 manifest；
+         本程序是 WPF，DPI 感知必须在 manifest 里声明，这条建议不适用 -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,6 +38,11 @@
 
   <ItemGroup>
     <Resource Include="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 关于页文案：改一句话只改 ABOUT.md，不碰 C#、不重算尺寸（规范 §八） -->
+    <EmbeddedResource Include="ABOUT.md" LogicalName="OAIRouter.ABOUT.md" />
   </ItemGroup>
 
 </Project>

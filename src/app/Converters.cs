@@ -24,6 +24,16 @@ public sealed class InverseBoolToVis : IValueConverter
         => value is not Visibility.Visible;
 }
 
+/// <summary>空字符串 → Collapsed，非空 → Visible</summary>
+public sealed class StringToVis : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => string.IsNullOrWhiteSpace(value as string) ? Visibility.Collapsed : Visibility.Visible;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 /// <summary>日志级别 → 文字颜色</summary>
 public sealed class LevelToBrush : IValueConverter
 {

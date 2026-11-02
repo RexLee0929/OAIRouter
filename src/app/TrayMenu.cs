@@ -11,7 +11,7 @@ namespace OAIRouter;
 public sealed record TrayEntry(string? Text, string? Icon, Action? Action)
 {
     public static TrayEntry Sep() => new(null, null, null);
-    public static TrayEntry Of(string text, string icon, Action action) => new(text, icon, action);
+    public static TrayEntry Of(string text, string? icon, Action action) => new(text, icon, action);
 }
 
 /// <summary>
@@ -62,22 +62,13 @@ public sealed class TrayMenu : Window
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            var icon = new Path
+            // 与主菜单同一张表、同一种缩放（24 栅格整体缩到 16），不再按墨迹外框拉伸
+            var icon = Icons.Get(entry.Icon, new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B)), 16);
+            if (icon is not null)
             {
-                Data = Geometry.Parse(Icons.Paths.TryGetValue(entry.Icon ?? "", out var d) ? d : Icons.Paths["arrow"]),
-                Stroke = new SolidColorBrush(Color.FromRgb(0x1B, 0x1B, 0x1B)),
-                StrokeThickness = 1.6,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                StrokeLineJoin = PenLineJoin.Round,
-                Width = 16,
-                Height = 16,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            Grid.SetColumn(icon, 0);
-            grid.Children.Add(icon);
+                Grid.SetColumn(icon, 0);
+                grid.Children.Add(icon);
+            }
 
             var text = new TextBlock
             {

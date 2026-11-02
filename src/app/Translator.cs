@@ -179,7 +179,7 @@ public static class Translator
             var outTools = new JsonArray();
             foreach (var t in tools)
             {
-                if (Str(t?["type"]) == "function" && t["function"] is JsonObject fn)
+                if (Str(t?["type"]) == "function" && t?["function"] is JsonObject fn)
                 {
                     var item = new JsonObject
                     {
@@ -234,7 +234,7 @@ public static class Translator
             foreach (var item in output)
             {
                 var type = Str(item?["type"]);
-                if (type == "message" && item["content"] is JsonArray content)
+                if (type == "message" && item?["content"] is JsonArray content)
                 {
                     foreach (var c in content)
                         text.Append(Str(c?["text"]));
@@ -247,8 +247,8 @@ public static class Translator
                         ["type"] = "function",
                         ["function"] = new JsonObject
                         {
-                            ["name"] = Str(item["name"]),
-                            ["arguments"] = Str(item["arguments"]),
+                            ["name"] = Str(item?["name"]),
+                            ["arguments"] = Str(item?["arguments"]),
                         },
                     });
                 }
@@ -305,6 +305,10 @@ public sealed class SseTranslator
     private readonly string _id = "chatcmpl-" + Guid.NewGuid().ToString("N")[..12];
     private readonly long _created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     private readonly StringBuilder _buffer = new();
+    private readonly StringBuilder _data = new();
+    private string _eventName = "";
+    private bool _hasData;
+    private bool _afterCr;
     private readonly Dictionary<string, int> _toolIndex = new();
     private int _nextToolIndex;
     private bool _roleSent;
@@ -313,6 +317,7 @@ public sealed class SseTranslator
 
     /// <summary>流结束后可从上游 usage 事件里拿到的用量</summary>
     public JsonObject? Usage { get; private set; }
+    public bool Failed { get; private set; }
 
     public SseTranslator(string model, bool wantUsage, Func<string, Task> write)
     {
@@ -352,37 +357,60 @@ public sealed class SseTranslator
 
     public async Task FeedAsync(string chunk)
     {
-        _buffer.Append(chunk);
-        while (true)
+        foreach (var c in chunk)
         {
-            var text = _buffer.ToString();
-            var idx = text.IndexOf("\n\n", StringComparison.Ordinal);
-            if (idx < 0) break;
-
-            var raw = text[..idx];
-            _buffer.Remove(0, idx + 2);
-
-            string name = "";
-            var data = new StringBuilder();
-            foreach (var line in raw.Split('\n'))
-            {
-                if (line.StartsWith("event:")) name = line[6..].Trim();
-                else if (line.StartsWith("data:"))
-                {
-                    if (data.Length > 0) data.Append('\n');
-                    data.Append(line[5..].Trim());
-                }
-            }
-            if (data.Length == 0) continue;
-
-            JsonObject? evt;
-            try { evt = JsonNode.Parse(data.ToString()) as JsonObject; }
-            catch { continue; }
-            if (evt is null) continue;
-
-            await HandleEvent(name.Length > 0 ? name : Translator.Str(evt["type"]), evt);
             if (_finished) return;
+            if (_afterCr)
+            {
+                _afterCr = false;
+                if (c == '\n') continue;
+            }
+            if (c == '\r' || c == '\n')
+            {
+                await ProcessLine();
+                _afterCr = c == '\r';
+            }
+            else _buffer.Append(c);
         }
+    }
+
+    private async Task ProcessLine()
+    {
+        var line = _buffer.ToString();
+        _buffer.Clear();
+        if (line.Length == 0)
+        {
+            await DispatchEvent();
+            return;
+        }
+        if (line[0] == ':') return;
+        var colon = line.IndexOf(':');
+        var field = colon < 0 ? line : line[..colon];
+        var value = colon < 0 ? "" : line[(colon + 1)..];
+        if (value.StartsWith(' ')) value = value[1..];
+        if (field == "event") _eventName = value;
+        else if (field == "data")
+        {
+            if (_hasData) _data.Append('\n');
+            _data.Append(value);
+            _hasData = true;
+        }
+    }
+
+    private async Task DispatchEvent()
+    {
+        var name = _eventName;
+        var data = _data.ToString();
+        var hasData = _hasData;
+        _eventName = "";
+        _data.Clear();
+        _hasData = false;
+        if (!hasData) return;
+        JsonObject? evt;
+        try { evt = JsonNode.Parse(data) as JsonObject; }
+        catch (JsonException) { return; }
+        if (evt is not null)
+            await HandleEvent(name.Length > 0 ? name : Translator.Str(evt["type"]), evt);
     }
 
     private async Task HandleEvent(string name, JsonObject evt)
@@ -439,8 +467,17 @@ public sealed class SseTranslator
                 break;
 
             case "response.completed":
+            case "response.incomplete":
                 {
                     var resp = evt["response"] as JsonObject ?? new JsonObject();
+                    var status = Translator.Str(resp["status"]);
+                    var incomplete = name == "response.incomplete" || status == "incomplete";
+                    if ((status.Length > 0 && status != "completed" && status != "incomplete") ||
+                        (incomplete && Translator.Str(resp["incomplete_details"]?["reason"]) != "max_output_tokens"))
+                    {
+                        await SendError("上游响应未成功完成");
+                        break;
+                    }
                     Usage = resp["usage"] as JsonObject;
                     var hasFn = (resp["output"] as JsonArray)?.Any(o => Translator.Str(o?["type"]) == "function_call") == true;
 
@@ -473,7 +510,7 @@ public sealed class SseTranslator
                     }
 
                     _finished = true;
-                    var fin = Chunk(new JsonObject(), hasFn ? "tool_calls" : "stop");
+                    var fin = Chunk(new JsonObject(), incomplete ? "length" : hasFn || _toolIndex.Count > 0 ? "tool_calls" : "stop");
                     if (_wantUsage && Translator.MapUsage(resp["usage"]) is { } usage) fin["usage"] = usage;
                     await Send(fin);
                     await _write("data: [DONE]\n\n");
@@ -483,21 +520,28 @@ public sealed class SseTranslator
             case "response.failed":
             case "error":
                 {
-                    var msg = evt["response"]?["error"]?["message"]?.GetValue<string>()
-                              ?? evt["message"]?.GetValue<string>() ?? "上游返回错误";
-                    await _write($"data: {new JsonObject { ["error"] = new JsonObject { ["message"] = msg, ["type"] = "upstream_error" } }.ToJsonString()}\n\n");
-                    await _write("data: [DONE]\n\n");
-                    _finished = true;
+                    var msg = Translator.Str(evt["response"]?["error"]?["message"]);
+                    if (msg.Length == 0) msg = Translator.Str(evt["error"]?["message"]);
+                    if (msg.Length == 0) msg = Translator.Str(evt["message"]);
+                    await SendError(msg.Length > 0 ? msg : "上游返回错误");
                     break;
                 }
         }
     }
 
+    private async Task SendError(string message)
+    {
+        Failed = true;
+        _finished = true;
+        await _write($"data: {new JsonObject { ["error"] = new JsonObject { ["message"] = message, ["type"] = "upstream_error" } }.ToJsonString()}\n\n");
+        await _write("data: [DONE]\n\n");
+    }
+
     public async Task EndAsync()
     {
         if (_finished) return;
-        _finished = true;
-        await Send(Chunk(new JsonObject(), "stop"));
-        await _write("data: [DONE]\n\n");
+        if (_buffer.Length > 0) await ProcessLine();
+        if (!_finished) await DispatchEvent();
+        if (!_finished) await SendError("上游流在完成事件前结束");
     }
 }
