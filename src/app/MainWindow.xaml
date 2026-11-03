@@ -22,6 +22,28 @@
             <sys:String>chat</sys:String>
             <sys:String>rewrite</sys:String>
         </x:Array>
+        <Style x:Key="RouteColumnThumb" TargetType="Thumb">
+            <Setter Property="Width" Value="10" />
+            <Setter Property="HorizontalAlignment" Value="Right" />
+            <Setter Property="Cursor" Value="SizeWE" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid Background="Transparent">
+                            <Border x:Name="Divider" Width="1" Height="14" Background="#D4DEE9" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Divider" Property="Background" Value="#8EA9C4" />
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="Divider" Property="Background" Value="#6C8FAC" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -53,7 +75,7 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <Border Grid.Column="0" Style="{StaticResource Card}">
+                <Border x:Name="ServiceCard" Grid.Column="0" Style="{StaticResource Card}" VerticalAlignment="Top">
                     <StackPanel>
                         <TextBlock Text="服务" Style="{StaticResource H1}" />
 
@@ -85,13 +107,21 @@
                                      TextChanged="OnMaxTokenChanged" ToolTip="无论客户端要多少都会被压到该值；0 表示不限制" />
                         </StackPanel>
 
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <TextBlock Text="客户端" Style="{StaticResource Sub}" VerticalAlignment="Center" />
+                            <ComboBox x:Name="ClientBox" Style="{StaticResource CellCombo}" Width="150" Margin="8,0,0,0" SelectionChanged="OnClientChanged" ToolTip="自动识别仅依赖可观察到的客户端标识" />
+                            <CheckBox x:Name="DiagnosticsBox" Content="实验性诊断" Margin="12,0,0,0" VerticalAlignment="Center"
+                                      Checked="OnDiagnosticsChanged" Unchecked="OnDiagnosticsChanged" />
+                        </StackPanel>
+                        <TextBlock x:Name="DiagnosticsHint" Style="{StaticResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" />
                         <CheckBox x:Name="AutoStartBox" Content="开机自启动（登录后自动在托盘运行）"
                                   Margin="0,14,0,0" FontSize="12" Foreground="#5C5C5C"
                                   Checked="OnAutoStartChanged" Unchecked="OnAutoStartChanged" />
                     </StackPanel>
                 </Border>
 
-                <Border Grid.Column="1" Style="{StaticResource Card}" Margin="12,0,0,0" Height="200">
+                <Border x:Name="StatsCard" Grid.Column="1" Style="{StaticResource Card}" Margin="12,0,0,0"
+                        Height="{Binding ActualHeight, ElementName=ServiceCard}" VerticalAlignment="Top">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -143,23 +173,28 @@
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
 
-                            <Grid Grid.Row="0" Margin="0,0,0,2">
-                                <TextBlock x:Name="UsageSummary" Style="{StaticResource Hint}" VerticalAlignment="Center" />
-                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <StackPanel Grid.Row="0" Margin="0,0,0,2">
+                                <TextBlock x:Name="UsageSummary" Style="{StaticResource Hint}" TextWrapping="Wrap" />
+                                <WrapPanel HorizontalAlignment="Right">
                                     <Button x:Name="GroupModel" Content="模型" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Click="OnGroupByModel" />
                                     <Button x:Name="GroupRoute" Content="路由" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupByRoute" />
                                     <Button x:Name="GroupSession" Content="会话" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupBySession"
-                                            ToolTip="按对话 ID 分组，时间为 OAIRouter 首次观测到的请求发起时间" />
+                                            ToolTip="按会话分组，点击展开查看对话；时间为 OAIRouter 首次观测到的请求发起时间" />
                                     <Button x:Name="GroupTime" Content="时间" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupByTime" />
-                                    <ComboBox x:Name="BucketBox" Style="{StaticResource CellCombo}" Width="92"
-                                              Height="22" Margin="4,0,0,0" Visibility="Collapsed"
-                                              SelectionChanged="OnBucketChanged" />
-                                </StackPanel>
-                            </Grid>
+                                    <Grid Width="100" Height="22" Margin="4,0,0,0">
+                                        <ComboBox x:Name="BucketBox" Style="{StaticResource CellCombo}"
+                                                  SelectionChanged="OnBucketChanged" />
+                                        <ComboBox x:Name="UsageRangeBox" Style="{StaticResource CellCombo}" Visibility="Collapsed"
+                                                  SelectionChanged="OnUsageRangeChanged" />
+                                    </Grid>
+                                    <Button Content="导出" Style="{StaticResource GhostButton}" Padding="8,1" FontSize="11"
+                                            Margin="3,0,0,0" Click="OnExportUsage" ToolTip="导出请求明细 CSV" />
+                                </WrapPanel>
+                            </StackPanel>
 
                             <Grid Grid.Row="1" Height="22" HorizontalAlignment="Left"
                                   Width="{Binding ViewportWidth, ElementName=UsageScroll}">
@@ -178,6 +213,7 @@
                             </Grid>
 
                             <ScrollViewer x:Name="UsageScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <Grid>
                                 <ItemsControl x:Name="UsageItems">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
@@ -198,6 +234,33 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
+                                <ItemsControl x:Name="SessionUsageItems" Visibility="Collapsed">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Height="24">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" MinWidth="60" />
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UReq" MinWidth="44" />
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UPrompt" MinWidth="58" />
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UComp" MinWidth="58" />
+                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UCost" MinWidth="68" />
+                                                </Grid.ColumnDefinitions>
+                                                <Button Grid.Column="0" Click="OnToggleSession" Visibility="{Binding IsParent, Converter={StaticResource BoolToVis}}"
+                                                        Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch"
+                                                        ToolTip="{Binding Row.Key}">
+                                                    <TextBlock Text="{Binding Title}" Style="{StaticResource CellText}" Margin="6,0,0,0" />
+                                                </Button>
+                                                <TextBlock Grid.Column="0" Text="{Binding Row.Key}" ToolTip="{Binding Row.Key}" Style="{StaticResource CellText}"
+                                                           Margin="24,0,0,0" Visibility="{Binding IsParent, Converter={StaticResource InverseBoolToVis}}" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Row.RequestsText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="2" Text="{Binding Row.PromptText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="3" Text="{Binding Row.CompletionText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="4" Text="{Binding Row.CostText}" Style="{StaticResource CellText}" Margin="6,0,4,0" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                </Grid>
                             </ScrollViewer>
                         </Grid>
                     </Grid>
@@ -220,7 +283,7 @@
                         </Grid.RowDefinitions>
 
                         <Grid Grid.Row="0" Margin="0,0,0,6">
-                            <TextBlock Text="路由规则" Style="{StaticResource H1}" VerticalAlignment="Center" />
+                            <TextBlock Text="上游配置" Style="{StaticResource H1}" VerticalAlignment="Center" />
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="RouteSortBtn" Content="名称 ↑" Style="{StaticResource GhostButton}"
                                         Padding="8,3" FontSize="11" Click="OnSortRoutes" />
@@ -229,12 +292,14 @@
                             </StackPanel>
                         </Grid>
 
-                        <Grid x:Name="RouteHeader" Grid.Row="1" Height="26" Margin="0,0,0,2">
+                        <ScrollViewer x:Name="RouteHeaderScroll" Grid.Row="1" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                        <Grid x:Name="RouteHeader" Height="26" Margin="0,0,0,2" HorizontalAlignment="Left">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="88" />
                                 <ColumnDefinition Width="104" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="126" />
+                                <ColumnDefinition Width="180" />
+                                <ColumnDefinition Width="110" />
+                                <ColumnDefinition Width="82" />
                                 <ColumnDefinition Width="30" />
                                 <ColumnDefinition Width="30" />
                                 <ColumnDefinition Width="30" />
@@ -242,21 +307,29 @@
                             <TextBlock Grid.Column="0" Text="前缀" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
                             <TextBlock Grid.Column="1" Text="名称" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
                             <TextBlock Grid.Column="2" Text="上游地址" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
-                            <TextBlock Grid.Column="3" Text="模式" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="3" Text="余额" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="4" Text="模式" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                            <Thumb Grid.Column="0" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnRouteColumnDrag" DragCompleted="OnRouteColumnResize" />
+                            <Thumb Grid.Column="1" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnRouteColumnDrag" DragCompleted="OnRouteColumnResize" />
+                            <Thumb Grid.Column="2" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnRouteColumnDrag" DragCompleted="OnRouteColumnResize" />
+                            <Thumb Grid.Column="3" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnRouteColumnDrag" DragCompleted="OnRouteColumnResize" />
+                            <Thumb Grid.Column="4" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnRouteColumnDrag" DragCompleted="OnRouteColumnResize" />
                         </Grid>
+                        </ScrollViewer>
 
                         <ScrollViewer x:Name="RouteScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled" ScrollChanged="OnTableScroll">
+                                      HorizontalScrollBarVisibility="Auto" ScrollChanged="OnTableScroll">
                             <Grid>
                                 <ItemsControl x:Name="RouteItems">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Grid Height="34">
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="88" />
-                                                    <ColumnDefinition Width="104" />
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="126" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[0].Width, ElementName=RouteHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[1].Width, ElementName=RouteHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[2].Width, ElementName=RouteHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[3].Width, ElementName=RouteHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[4].Width, ElementName=RouteHeader}" />
                                                     <ColumnDefinition Width="30" />
                                                     <ColumnDefinition Width="30" />
                                                     <ColumnDefinition Width="30" />
@@ -284,6 +357,13 @@
                                                              Visibility="{Binding IsEditing, Converter={StaticResource BoolToVis}}" />
                                                 </Grid>
                                                 <Grid Grid.Column="3">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                                    <Button Grid.Column="0" Style="{StaticResource RowBtn}" Click="OnRefreshBalance" ToolTip="刷新余额">
+                                                        <ui:IconView Icon="restart" IconSize="13" IconBrush="{StaticResource SubBrush}" />
+                                                    </Button>
+                                                    <TextBlock Grid.Column="1" Style="{StaticResource CellText}" Text="{Binding BalanceDisplay}" ToolTip="{Binding BalanceDisplay}" />
+                                                </Grid>
+                                                <Grid Grid.Column="4">
                                                     <TextBlock Style="{StaticResource CellText}" Text="{Binding Mode}"
                                                                Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVis}}" />
                                                     <ComboBox Style="{StaticResource CellCombo}" Margin="4,0,4,0" IsEditable="True"
@@ -293,27 +373,42 @@
                                                               ToolTip="responses 协议翻译 / chat 原样透传 / rewrite 参数改写，也可直接输入自定义值" />
                                                 </Grid>
 
-                                                <Button Grid.Column="4" Style="{StaticResource RowBtn}" Click="OnCopyRouteEndpoint"
+                                                <Button Grid.Column="5" Style="{StaticResource RowBtn}" Click="OnCopyRouteEndpoint"
                                                         ToolTip="复制这个上游的接口地址">
                                                     <ui:IconView Icon="copy" IconSize="13"
                                                                  IconBrush="{StaticResource SubBrush}" />
                                                 </Button>
 
-                                                <Button Grid.Column="5" Style="{StaticResource RowBtn}" Click="OnToggleEditRoute"
+                                                <Button Grid.Column="6" Style="{StaticResource RowBtn}" Click="OnToggleEditRoute"
                                                         ToolTip="编辑这一行"
                                                         Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVis}}">
                                                     <ui:IconView Icon="edit" IconSize="13"
                                                                  IconBrush="{StaticResource SubBrush}" />
                                                 </Button>
-                                                <Button Grid.Column="5" Style="{StaticResource RowBtn}" Click="OnToggleEditRoute"
+                                                <Button Grid.Column="6" Style="{StaticResource RowBtn}" Click="OnToggleEditRoute"
                                                         ToolTip="完成编辑"
                                                         Visibility="{Binding IsEditing, Converter={StaticResource BoolToVis}}">
                                                     <ui:IconView Icon="check" IconSize="13"
                                                                  IconBrush="{DynamicResource AccentBrush}" />
                                                 </Button>
 
-                                                <Button Grid.Column="6" Style="{StaticResource RowDelete}"
-                                                        Click="OnRemoveRouteRow" ToolTip="删除这条路由" />
+                                                <Button Grid.Column="7" Style="{StaticResource RowBtn}" Content="删"
+                                                        Click="OnRemoveRouteRow" ToolTip="删除这条上游，需再次确认">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Grid Background="Transparent">
+                                                                <ui:IconView x:Name="DeleteIcon" Icon="trash" IconSize="13" IconBrush="{StaticResource SubBrush}" />
+                                                                <ContentPresenter x:Name="ConfirmLabel" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                            </Grid>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="Content" Value="确认">
+                                                                    <Setter TargetName="DeleteIcon" Property="Visibility" Value="Collapsed" />
+                                                                    <Setter TargetName="ConfirmLabel" Property="Visibility" Value="Visible" />
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
                                             </Grid>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>

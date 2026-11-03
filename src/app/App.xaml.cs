@@ -11,6 +11,7 @@ public partial class App : Application
     private EventWaitHandle? _wake;
     private Thread? _wakeThread;
 
+    public static bool IsDev { get; private set; }
     public static AppConfig Config { get; private set; } = new();
     public static ProxyService Proxy { get; } = new();
     public static MainWindow? Shell { get; private set; }
@@ -18,6 +19,11 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        var processName = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "";
+        IsDev = e.Args.Contains("--dev", StringComparer.OrdinalIgnoreCase)
+            || string.Equals(processName, "OAIRouter.Dev", StringComparison.OrdinalIgnoreCase)
+            || processName.StartsWith("OAIRouter.Dev.", StringComparison.OrdinalIgnoreCase);
+        if (IsDev) Directory.CreateDirectory(ConfigStore.Dir);
 
         var iconTestExitCode = DebugTools.TryRunIconTest(e.Args);
         if (iconTestExitCode.HasValue)
@@ -33,7 +39,13 @@ public partial class App : Application
         // 悬停浅档：GhostButton / 菜单子项 / 下拉条目的 IsMouseOver 都吃这一支（§十三.2）
         Resources["AccentHoverBrush"] = Accent.HoverBrush;
 
+        var firstDevRun = IsDev && !File.Exists(ConfigStore.Path);
         Config = ConfigStore.Load();
+        if (firstDevRun)
+        {
+            Config.Port = 18787;
+            ConfigStore.Save(Config);
+        }
         LogStore.Instance.Limit = Config.LogLimit;
 
         var name = InstanceName();
@@ -120,7 +132,7 @@ public partial class App : Application
     /// 可以同时跑两个进程（端口还会冲突）——使用者把它当多开的 bug 报上来。
     /// 现在全局唯一：哪个副本先跑，后启动的都只负责把它的窗口唤到前台。
     /// </summary>
-    private static string InstanceName() => Brand.Name;
+    private static string InstanceName() => IsDev ? Brand.Name + ".Dev" : Brand.Name;
 
     protected override void OnExit(ExitEventArgs e)
     {

@@ -11,6 +11,7 @@ public static class Autostart
 
     public static bool IsEnabled()
     {
+        if (App.IsDev) return false;
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey);
@@ -21,6 +22,7 @@ public static class Autostart
 
     public static bool Set(bool enabled)
     {
+        if (App.IsDev) return false;
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKey, writable: true);

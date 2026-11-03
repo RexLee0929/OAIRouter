@@ -198,6 +198,29 @@
         </Setter>
     </Style>
 
+    <Style x:Key="PasswordInput" TargetType="PasswordBox">
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="Padding" Value="7,5" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="PasswordBox">
+                    <Border x:Name="bd" Background="White" CornerRadius="4"
+                            BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- 日志列表 -->
     <Style x:Key="LogList" TargetType="ListBox">
         <Setter Property="Background" Value="White" />
@@ -324,6 +347,7 @@
                         <Grid Margin="8,0,24,0">
                             <ContentPresenter x:Name="content" Content="{TemplateBinding SelectionBoxItem}"
                                               ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
                                               VerticalAlignment="Center" IsHitTestVisible="False" />
                             <TextBox x:Name="PART_EditableTextBox" Visibility="Collapsed" Background="Transparent"
                                      BorderThickness="0" VerticalContentAlignment="Center" FontSize="12"

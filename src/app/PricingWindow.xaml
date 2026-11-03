@@ -23,7 +23,7 @@
                     <Button x:Name="SortBtn" Content="名称 ↑" Style="{StaticResource GhostButton}" Padding="12,5"
                             Margin="6,0,0,0" Click="OnSortByName"
                             ToolTip="按模型名排序，同名按路由和挡位起点；再次点击切换升降序" />
-                    <Button Content="从上游同步…" Style="{StaticResource PrimaryButton}" Padding="14,6"
+                    <Button Content="从上游同步" Style="{StaticResource PrimaryButton}" Padding="14,6"
                             Margin="8,0,0,0" Click="OnOpenSync" />
                     <Border Width="1" Height="16" Background="{StaticResource LineBrush}" Margin="14,0" />
                     <TextBlock Text="单价：美元 / 百万 token" Style="{StaticResource Hint}" VerticalAlignment="Center" />

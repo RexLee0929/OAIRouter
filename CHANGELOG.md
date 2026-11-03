@@ -1,8 +1,22 @@
-# Changelog
+# 更新日志
 
 本项目的所有显著变更都记录在这个文件里。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+## [1.0.3] - 2026-11-03
+
+### 新增
+
+- 用量统计支持按模型、路由或会话选择时间范围，并可导出请求明细 CSV
+- 增加客户端类型选择与识别，会话统计支持展开查看请求标识分组及有条件的推断关联
+- 上游配置支持余额查询和本地密钥映射，价格同步可按上游类型使用查询凭据；密钥使用 Windows DPAPI 保护
+- 增加默认关闭的实验性诊断，记录在独立的诊断日志中
+
+### 变更
+
+- 调整上游配置窗口、列表列宽与统计区域布局，展开会话时保持统计区域内部滚动
+- 统一文档格式，修正计价、会话分组、首版隐私与转发说明，以及关于文案
 
 ## [1.0.2] - 2026-11-02
 
@@ -47,6 +61,7 @@
 - 配置导入导出：导出完整配置，导入时可勾选路由、映射、价格表、模型库和设置；每次启动自动备份 `config.json`，最多 10 份
 - 6 页中文安装向导（双模式、保留配置升级、静默安装 `--silent`），卸载可保留个人数据
 
+[1.0.3]: https://github.com/RexLee0929/OAIRouter/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/RexLee0929/OAIRouter/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/RexLee0929/OAIRouter/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/RexLee0929/OAIRouter/releases/tag/v1.0.0

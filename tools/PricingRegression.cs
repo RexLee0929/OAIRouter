@@ -54,6 +54,29 @@ try
         groups.Single(x => x.Key == "未识别会话").Requests != 2)
         throw new Exception("重启后会话分组与历史数据不一致");
     Console.WriteLine("PASS 按真实会话 ID、首次请求时间分组和重启加载");
+
+    var hashA = new string('a', 64);
+    var hashB = new string('a', 20) + new string('b', 44);
+    UsageStats.Record("route", "alias", "target", 0, 0, 0, 0, 1, 200, hashA, first);
+    UsageStats.Record("route", "alias", "target", 0, 0, 0, 0, 1, 200, hashB, first);
+    var shortened = UsageStats.Group(UsageGroup.Session, cfg).Where(x => x.Key.EndsWith(new string('a', 20))).ToList();
+    if (shortened.Count != 2 || shortened.Any(x => x.Requests != 1 || x.Key.Contains(hashA) || x.Key.Contains(hashB)))
+        throw new Exception("会话显示缩短或完整哈希分组失败");
+    if (!UsageStats.ExportCsv(cfg).Contains(hashA) || !UsageStats.ExportCsv(cfg).Contains(hashB))
+        throw new Exception("导出未保留完整会话哈希");
+    Console.WriteLine("PASS 会话哈希完整分组与缩短显示");
+
+    var since = DateTime.Now.AddHours(-1);
+    foreach (var group in new[] { UsageGroup.Model, UsageGroup.Route, UsageGroup.Session })
+        if (UsageStats.Group(group, cfg, since: since).Sum(x => x.Requests) != 5)
+            throw new Exception($"{group} 时间筛选失败");
+    if (UsageStats.Group(UsageGroup.Time, cfg).Sum(x => x.Requests) != 7)
+        throw new Exception("时间分组应保留全部记录");
+    UsageStats.Record("=危险,\"路由", "模型", "target", 1, 2, 0, 0, 1, 200);
+    var csv = UsageStats.ExportCsv(cfg, since);
+    if (!csv.Contains("\"'=危险,\"\"路由\"") || csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length != 7)
+        throw new Exception("CSV 筛选或转义失败");
+    Console.WriteLine("PASS 统计时间范围及 CSV 导出");
 }
 finally
 {

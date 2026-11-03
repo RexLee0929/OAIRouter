@@ -52,7 +52,7 @@ public sealed class PriceCandidate : INotifyPropertyChanged
 
 public partial class PriceSyncWindow : Window
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(25) };
+    private static readonly HttpClient Http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(25) };
     private readonly AppConfig _cfg;
     private readonly ObservableCollection<PriceCandidate> _results = new();
 
@@ -63,7 +63,7 @@ public partial class PriceSyncWindow : Window
         InitializeComponent();
         _cfg = cfg;
 
-        SourceBox.ItemsSource = new[] { "new-api 中转", "LiteLLM 社区价格表", "自定义 JSON 地址" };
+        SourceBox.ItemsSource = new[] { "已添加上游", "LiteLLM 社区价格表", "自定义 JSON 地址" };
         SourceBox.SelectedIndex = 0;
 
         ResultItems.ItemsSource = _results;
@@ -75,23 +75,27 @@ public partial class PriceSyncWindow : Window
     private void OnSourceChanged(object sender, SelectionChangedEventArgs e)
     {
         var index = SourceBox.SelectedIndex;
-        var isNewApi = index == 0;
+        var isUpstream = index == 0;
 
-        UpstreamBox.Visibility = isNewApi ? Visibility.Visible : Visibility.Collapsed;
-        AuthPanel.Visibility = isNewApi ? Visibility.Visible : Visibility.Collapsed;
+        UpstreamBox.Visibility = isUpstream ? Visibility.Visible : Visibility.Collapsed;
+        AuthPanel.Visibility = Visibility.Collapsed;
         UrlBox.IsReadOnly = false;
+        _results.Clear();
 
-        if (isNewApi)
+        if (isUpstream)
         {
-            var items = _cfg.Routes
-                .Where(r => !string.IsNullOrWhiteSpace(r.Upstream))
-                .Select(r => $"{r.Prefix} · {r.Upstream}")
-                .ToList();
+            var items = _cfg.Routes.Where(r => !string.IsNullOrWhiteSpace(r.Upstream)).ToList();
             UpstreamBox.ItemsSource = items;
-            if (items.Count > 0) UpstreamBox.SelectedIndex = 0;
-
-            UrlBox.Text = items.Count > 0 ? NormalizeNewApiUrl(_cfg.Routes[0].Upstream) : "";
-            HintText.Text = "站点若设为「登录可见」，需填访问令牌；地址可直接改成别的站点";
+            if (items.Count > 0)
+            {
+                UpstreamBox.SelectedIndex = 0;
+                UpdateUpstreamSource(items[0]);
+            }
+            else
+            {
+                UrlBox.Text = "";
+                HintText.Text = "请先添加上游";
+            }
         }
         else if (index == 1)
         {
@@ -101,17 +105,40 @@ public partial class PriceSyncWindow : Window
         else
         {
             UrlBox.Text = "";
-            HintText.Text = "支持 new-api 格式或 {模型:{价格}} 格式";
+            HintText.Text = "填写完整 JSON 地址；支持 NewAPI、LiteLLM 或 models 数组格式";
         }
     }
 
     private void OnUpstreamChanged(object sender, SelectionChangedEventArgs e)
     {
         if (SourceBox.SelectedIndex != 0) return;
-        var index = UpstreamBox.SelectedIndex;
-        if (index < 0 || index >= _cfg.Routes.Count) return;
-        UrlBox.Text = NormalizeNewApiUrl(_cfg.Routes[index].Upstream);
+        if (UpstreamBox.SelectedItem is not RouteRule route) return;
+        _results.Clear();
+        UpdateUpstreamSource(route);
     }
+
+    private void UpdateUpstreamSource(RouteRule route)
+    {
+        var isNewApi = IsNewApi(route);
+        UrlBox.Text = isNewApi ? NormalizeNewApiUrl(route.Upstream) : "";
+        var isCustom = string.Equals(route.BalanceType, "自定义", StringComparison.OrdinalIgnoreCase) && !IsOfficialOpenAi(route);
+        AuthPanel.Visibility = isNewApi || isCustom ? Visibility.Visible : Visibility.Collapsed;
+        UseUpstreamCredential.IsChecked = false;
+        UseUpstreamCredential.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+        AuthHint.Text = isCustom ? "仅同源 HTTPS（本机可 HTTP）；GET JSON" : "凭据与用户 ID 在上游配置中设置。";
+        HintText.Text = isNewApi
+            ? "NewAPI：使用该上游余额令牌和用户 ID"
+            : string.Equals(route.BalanceType, "OpenAI", StringComparison.OrdinalIgnoreCase) || IsOfficialOpenAi(route)
+                ? "OpenAI 无通用价格 API；请填写公开 JSON 地址"
+                : "自定义上游：GET JSON，可选复用上游余额令牌";
+    }
+
+    private static bool IsOfficialOpenAi(RouteRule route) =>
+        Uri.TryCreate(route.Upstream, UriKind.Absolute, out var uri) &&
+        string.Equals(uri.Host, "api.openai.com", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNewApi(RouteRule route) =>
+        !IsOfficialOpenAi(route) && string.Equals(route.BalanceType, "NewAPI", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>用主机名把地址匹配回已配置的路由前缀。</summary>
     private string MatchRoutePrefix(string url)
@@ -137,6 +164,7 @@ public partial class PriceSyncWindow : Window
         var url = (input ?? "").Trim().TrimEnd('/');
         if (url.Length == 0) return "";
         if (url.EndsWith("/api/pricing", StringComparison.OrdinalIgnoreCase)) return url;
+        if (url.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) url = url[..^3];
         return url + "/api/pricing";
     }
 
@@ -149,35 +177,55 @@ public partial class PriceSyncWindow : Window
             return;
         }
 
-        // 先按地址把用户填的站点匹配到已配置的路由；匹配不到就落到 *（全部上游）
-        var routePrefix = MatchRoutePrefix(url);
+        var selected = SourceBox.SelectedIndex == 0 ? UpstreamBox.SelectedItem as RouteRule : null;
+        if (SourceBox.SelectedIndex == 0 && selected is null)
+        {
+            StatusText.Text = "请先选择已添加上游";
+            return;
+        }
+        var routePrefix = selected?.Prefix ?? MatchRoutePrefix(url);
 
         try
         {
             StatusText.Text = "正在获取 …";
             _results.Clear();
 
-            if (SourceBox.SelectedIndex == 0)
+            var isNewApi = selected is not null && IsNewApi(selected);
+            if (isNewApi)
             {
                 url = NormalizeNewApiUrl(url);
                 UrlBox.Text = url;
             }
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var actual) ||
+                (actual.Scheme != Uri.UriSchemeHttp && actual.Scheme != Uri.UriSchemeHttps) ||
+                !string.IsNullOrEmpty(actual.UserInfo))
+                throw new InvalidOperationException("请输入完整的 HTTP(S) JSON 地址，且不能包含用户信息。");
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var request = new HttpRequestMessage(HttpMethod.Get, actual);
 
-            var token = (TokenBox.Text ?? "").Trim();
-            if (token.Length > 0)
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-            var userId = (UserBox.Text ?? "").Trim();
-            if (userId.Length > 0)
-                request.Headers.TryAddWithoutValidation("New-Api-User", userId);
+            var useCustomCredential = selected is not null &&
+                string.Equals(selected.BalanceType, "自定义", StringComparison.OrdinalIgnoreCase) &&
+                !IsOfficialOpenAi(selected) && UseUpstreamCredential.IsChecked == true;
+            if ((isNewApi || useCustomCredential) && selected is not null)
+            {
+                if (!Uri.TryCreate(selected.Upstream, UriKind.Absolute, out var expected) ||
+                    actual.Scheme != expected.Scheme || actual.Host != expected.Host || actual.Port != expected.Port)
+                    throw new InvalidOperationException("地址与所选上游不一致，未发送凭据。");
+                var token = SecretProtection.Unprotect(selected.ProtectedBalanceKey);
+                if ((token.Length > 0 || (isNewApi && !string.IsNullOrWhiteSpace(selected.BalanceUserId))) &&
+                    actual.Scheme != Uri.UriSchemeHttps && !actual.IsLoopback)
+                    throw new InvalidOperationException("非本机地址必须使用 HTTPS 才能发送凭据。");
+                if (token.Length > 0)
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (isNewApi && !string.IsNullOrWhiteSpace(selected.BalanceUserId))
+                    request.Headers.TryAddWithoutValidation("New-Api-User", selected.BalanceUserId);
+            }
 
             using var response = await Http.SendAsync(request);
             if (!response.IsSuccessStatusCode)
             {
                 StatusText.Text = response.StatusCode == System.Net.HttpStatusCode.Unauthorized
-                    ? "站点需要登录：填上访问令牌（和用户 ID）再试"
+                    ? "站点需要登录：请检查该上游的余额查询令牌和用户 ID"
                     : $"获取失败：HTTP {(int)response.StatusCode}";
                 return;
             }

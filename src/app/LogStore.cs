@@ -34,6 +34,7 @@ public sealed class LogStore
 
     public string LogDir => Path.Combine(ConfigStore.Dir, "logs");
     public string LogFile => Path.Combine(LogDir, "app.log");
+    public string DiagnosticsFile => Path.Combine(LogDir, "diagnostics.log");
 
     private LogStore() { }
 
@@ -85,19 +86,26 @@ public sealed class LogStore
         _ => "·",
     };
 
-    private void Append(LogItem item)
+    public void Diagnostic(string text) => Append(DiagnosticsFile, $"实验诊断 · {text}");
+
+    private void Append(LogItem item) => Append(LogFile, item.Text);
+
+    private void Append(string file, string text)
     {
         try
         {
-            Directory.CreateDirectory(LogDir);
-            var info = new FileInfo(LogFile);
-            if (info.Exists && info.Length > 2 * 1024 * 1024)
+            lock (_gate)
             {
-                var bak = LogFile + ".1";
-                if (File.Exists(bak)) File.Delete(bak);
-                File.Move(LogFile, bak);
+                Directory.CreateDirectory(LogDir);
+                var info = new FileInfo(file);
+                if (info.Exists && info.Length > 2 * 1024 * 1024)
+                {
+                    var bak = file + ".1";
+                    if (File.Exists(bak)) File.Delete(bak);
+                    File.Move(file, bak);
+                }
+                File.AppendAllText(file, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {text}{Environment.NewLine}");
             }
-            File.AppendAllText(LogFile, $"{DateTime.Now:yyyy-MM-dd} {item.Line}{Environment.NewLine}");
         }
         catch
         {

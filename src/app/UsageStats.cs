@@ -9,6 +9,11 @@ public sealed class UsageRecord
     public DateTime Time { get; init; }
     public DateTime? StartedAt { get; init; }
     public string SessionId { get; init; } = "";
+    public string Client { get; init; } = "";
+    public string TraceId { get; init; } = "";
+    public string DialogId { get; init; } = "";
+    public bool DialogIdMissing { get; init; }
+    public bool LegacyDiagnostic { get; init; }
     public string Route { get; init; } = "";
     /// <summary>展示名 = 模型映射名（客户端实际填的那个别名）。分组与「按模型」列表都看它。</summary>
     public string Model { get; init; } = "";
@@ -24,6 +29,7 @@ public sealed class UsageRecord
 
 public sealed class UsageRow
 {
+    public string Id { get; init; } = "";
     public string Key { get; init; } = "";
     public int Requests { get; init; }
     public long Prompt { get; init; }
@@ -44,6 +50,13 @@ public sealed class UsageRow
             return Prompt + Completion > 0 ? "无价格" : "—";
         }
     }
+}
+
+public sealed class SessionUsageGroup
+{
+    public string Id { get; init; } = "";
+    public UsageRow Total { get; init; } = new();
+    public List<UsageRow> Dialogs { get; init; } = new();
 }
 
 public enum UsageGroup { Model, Route, Session, Time }
@@ -83,12 +96,11 @@ public static class UsageStats
     {
         try
         {
-            if (!System.IO.File.Exists(FilePath)) return;
-            var lines = System.IO.File.ReadAllLines(FilePath);
-            var start = Math.Max(0, lines.Length - MaxRecords);
-
             lock (Gate)
             {
+                if (!System.IO.File.Exists(FilePath)) return;
+                var lines = System.IO.File.ReadAllLines(FilePath);
+                var start = Math.Max(0, lines.Length - MaxRecords);
                 Items.Clear();
                 for (var i = start; i < lines.Length; i++)
                 {
@@ -105,6 +117,10 @@ public static class UsageStats
                             Time = DateTime.TryParse(o["t"]?.GetValue<string>(), out var t) ? t : DateTime.Now,
                             StartedAt = DateTime.TryParse(o["startedAt"]?.GetValue<string>(), null, DateTimeStyles.RoundtripKind, out var startedAt) ? startedAt : null,
                             SessionId = o["sessionId"]?.GetValue<string>() ?? "",
+                            Client = o["client"]?.GetValue<string>() ?? "",
+                            TraceId = o["traceId"]?.GetValue<string>() ?? "",
+                            DialogId = o["dialogId"]?.GetValue<string>() ?? "",
+                            DialogIdMissing = o["dialogIdMissing"]?.GetValue<bool>() ?? false,
                             Route = o["r"]?.GetValue<string>() ?? "",
                             Model = display,
                             Target = real,
@@ -130,7 +146,8 @@ public static class UsageStats
     /// <param name="target">真实名：发给上游的模型名，计价用它。为空时退化成展示名。</param>
     public static void Record(string route, string model, string target, long prompt, long completion,
                               long cacheRead, long cacheWrite, long ms, int status,
-                              string sessionId = "", DateTime? startedAt = null)
+                              string sessionId = "", DateTime? startedAt = null,
+                              string client = "", string traceId = "", string dialogId = "", bool dialogIdMissing = false)
     {
         var display = string.IsNullOrWhiteSpace(model) ? (target ?? "") : model;
         var real = string.IsNullOrWhiteSpace(target) ? display : target;
@@ -140,6 +157,10 @@ public static class UsageStats
             Time = DateTime.Now,
             StartedAt = startedAt,
             SessionId = string.IsNullOrWhiteSpace(sessionId) ? "" : sessionId,
+            Client = string.IsNullOrWhiteSpace(client) ? "" : client,
+            TraceId = string.IsNullOrWhiteSpace(traceId) ? "" : traceId,
+            DialogId = string.IsNullOrWhiteSpace(dialogId) ? "" : dialogId,
+            DialogIdMissing = dialogIdMissing,
             Route = route ?? "",
             Model = display,
             Target = real,
@@ -155,29 +176,32 @@ public static class UsageStats
         {
             Items.Add(record);
             if (Items.Count > MaxRecords) Items.RemoveRange(0, Items.Count - MaxRecords);
-        }
-
-        try
-        {
-            var line = new JsonObject
+            try
             {
-                ["t"] = record.Time.ToString("yyyy-MM-dd HH:mm:ss"),
-                ["startedAt"] = record.StartedAt?.ToString("O"),
-                ["sessionId"] = record.SessionId,
-                ["r"] = record.Route,
-                ["m"] = record.Model,
-                // 真实名单独一列：界面按映射名分组，计价仍按真实名匹配价格表，两者互不影响
-                ["mt"] = record.Target,
-                ["p"] = record.Prompt,
-                ["c"] = record.Completion,
-                ["cr"] = record.CacheRead,
-                ["cw"] = record.CacheWrite,
-                ["ms"] = record.Ms,
-                ["s"] = record.Status,
-            }.ToJsonString();
-            System.IO.File.AppendAllText(FilePath, line + Environment.NewLine);
+                var line = new JsonObject
+                {
+                    ["t"] = record.Time.ToString("yyyy-MM-dd HH:mm:ss"),
+                    ["startedAt"] = record.StartedAt?.ToString("O"),
+                    ["sessionId"] = record.SessionId,
+                    ["client"] = record.Client,
+                    ["traceId"] = record.TraceId,
+                    ["dialogId"] = record.DialogId,
+                    ["dialogIdMissing"] = record.DialogIdMissing,
+                    ["r"] = record.Route,
+                    ["m"] = record.Model,
+                    // 真实名单独一列：界面按映射名分组，计价仍按真实名匹配价格表，两者互不影响
+                    ["mt"] = record.Target,
+                    ["p"] = record.Prompt,
+                    ["c"] = record.Completion,
+                    ["cr"] = record.CacheRead,
+                    ["cw"] = record.CacheWrite,
+                    ["ms"] = record.Ms,
+                    ["s"] = record.Status,
+                }.ToJsonString();
+                System.IO.File.AppendAllText(FilePath, line + Environment.NewLine);
+            }
+            catch { }
         }
-        catch { }
 
         Changed?.Invoke();
     }
@@ -187,9 +211,9 @@ public static class UsageStats
         lock (Gate) return Items.ToList();
     }
 
-    public static List<UsageRow> Group(UsageGroup by, AppConfig cfg, TimeSpan? bucketSize = null)
+    public static List<UsageRow> Group(UsageGroup by, AppConfig cfg, TimeSpan? bucketSize = null, DateTime? since = null)
     {
-        var items = Snapshot();
+        var items = Snapshot().Where(i => since is null || i.Time >= since.Value).ToList();
 
         if (by == UsageGroup.Time)
         {
@@ -211,7 +235,7 @@ public static class UsageStats
                     var first = g.Min(i => i.StartedAt);
                     var key = g.Key.Length == 0
                         ? "未识别会话"
-                        : $"{(first is null ? "发起时间未知" : first.Value.ToString("yyyy-MM-dd HH:mm:ss"))} · {g.Key}";
+                        : $"{(first is null ? "发起时间未知" : first.Value.ToString("yyyy-MM-dd HH:mm:ss"))} · {(g.Key.Length == 64 && g.Key.All(Uri.IsHexDigit) ? g.Key[..20] : g.Key)}";
                     return BuildRow(key, g.ToList(), cfg, first?.Ticks ?? 0);
                 })
                 .OrderByDescending(r => r.Order)
@@ -229,6 +253,108 @@ public static class UsageStats
             .ToList();
     }
 
+    public static List<SessionUsageGroup> GroupSessions(AppConfig cfg, DateTime? since)
+        => GroupSessions(cfg, since, LegacyUsageEvidence.Enrich(Snapshot(), LogStore.Instance.DiagnosticsFile));
+
+    public static List<SessionUsageGroup> GroupSessions(AppConfig cfg, DateTime? since,
+        IEnumerable<UsageRecord> records, IEnumerable<UsageRecord>? associationHistory = null)
+    {
+        var items = records.ToList();
+        var history = associationHistory is null ? items : items.Concat(associationHistory).ToList();
+        var associations = history
+            .Where(i => i.Client == "workbuddy" && !string.IsNullOrWhiteSpace(i.TraceId) && !string.IsNullOrWhiteSpace(i.DialogId))
+            .GroupBy(i => i.TraceId, StringComparer.Ordinal)
+            .Select(g => new { Trace = g.Key, Records = g.ToList() })
+            .Where(g => g.Records.All(i => !string.IsNullOrWhiteSpace(i.SessionId)))
+            .Select(g => new { g.Trace, Pairs = g.Records.Select(i => (i.SessionId, i.DialogId)).Distinct().ToList() })
+            .Where(g => g.Pairs.Count == 1)
+            .ToDictionary(g => g.Trace, g => g.Pairs[0], StringComparer.Ordinal);
+
+        var mainSessions = history
+            .Where(i => i.Client == "workbuddy" && !string.IsNullOrWhiteSpace(i.SessionId) && !string.IsNullOrWhiteSpace(i.DialogId))
+            .Select(i => i.SessionId).ToHashSet(StringComparer.Ordinal);
+        var evidenceByTrace = history
+            .Where(i => i.Client == "workbuddy" && !string.IsNullOrWhiteSpace(i.TraceId) && !string.IsNullOrWhiteSpace(i.DialogId))
+            .GroupBy(i => i.TraceId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(i => i.SessionId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+        var crossTargets = history
+            .Where(i => i.Client == "workbuddy" && i.DialogIdMissing && string.IsNullOrWhiteSpace(i.DialogId)
+                && !string.IsNullOrWhiteSpace(i.SessionId) && !string.IsNullOrWhiteSpace(i.TraceId)
+                && evidenceByTrace.ContainsKey(i.TraceId))
+            .SelectMany(i => evidenceByTrace[i.TraceId].Select(target => (Source: i.SessionId, Target: target)))
+            .GroupBy(i => i.Source, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(i => i.Target).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+
+        var assigned = items.Select(i =>
+        {
+            var session = string.IsNullOrWhiteSpace(i.SessionId) ? "" : i.SessionId;
+            var dialog = string.IsNullOrWhiteSpace(i.DialogId) ? "" : i.DialogId;
+            var inferred = false;
+            if (i.Client == "workbuddy" && i.DialogIdMissing && dialog.Length == 0 && session.Length != 0
+                && !string.IsNullOrWhiteSpace(i.TraceId)
+                && associations.TryGetValue(i.TraceId, out var pair)
+                && (session == pair.SessionId || (!mainSessions.Contains(session)
+                    && crossTargets.TryGetValue(session, out var targets)
+                    && targets.Count == 1 && targets[0] == pair.SessionId)))
+            {
+                session = pair.SessionId;
+                dialog = pair.DialogId;
+                inferred = true;
+            }
+            return (Record: i, Session: session, Dialog: dialog, Inferred: inferred);
+        }).Where(i => since is null || i.Record.Time >= since.Value).ToList();
+
+        static string ShortId(string id) => id.Length == 64 && id.All(Uri.IsHexDigit) ? id[..20] : id;
+        static string TimeLabel(DateTime? time) => time is null ? "发起时间未知" : time.Value.ToString("yyyy-MM-dd HH:mm:ss");
+
+        return assigned.GroupBy(i => i.Session, StringComparer.Ordinal).Select(session =>
+        {
+            var sessionItems = session.Select(i => i.Record).ToList();
+            var first = sessionItems.Min(i => i.StartedAt);
+            var title = session.Key.Length == 0 ? "未识别会话" : $"{TimeLabel(first)} · {ShortId(session.Key)}";
+            var dialogs = session.GroupBy(i => i.Dialog, StringComparer.Ordinal).Select(dialog =>
+            {
+                var dialogItems = dialog.Select(i => i.Record).ToList();
+                var dialogFirst = dialogItems.Min(i => i.StartedAt);
+                var dialogTitle = dialog.Key.Length == 0 ? "未识别对话" :
+                    $"对话（请求标识） · {TimeLabel(dialogFirst)} · {ShortId(dialog.Key)}";
+                if (dialog.Any(i => i.Record.LegacyDiagnostic)) dialogTitle += " · 历史诊断推断";
+                else if (dialog.Any(i => i.Inferred)) dialogTitle += " · 含推断关联";
+                return BuildRow(dialogTitle, dialogItems, cfg, dialogFirst?.Ticks ?? 0, dialog.Key);
+            }).OrderByDescending(r => r.Order).ThenBy(r => r.Id, StringComparer.Ordinal).ToList();
+            return new SessionUsageGroup
+            {
+                Id = session.Key,
+                Total = BuildRow(title, sessionItems, cfg, first?.Ticks ?? 0, session.Key),
+                Dialogs = dialogs,
+            };
+        }).OrderByDescending(g => g.Total.Order).ThenBy(g => g.Id, StringComparer.Ordinal).ToList();
+    }
+
+    public static string ExportCsv(AppConfig cfg, DateTime? since = null)
+    {
+        static string Cell(string value)
+        {
+            if (value.TrimStart().StartsWith('=') || value.TrimStart().StartsWith('+') ||
+                value.TrimStart().StartsWith('-') || value.TrimStart().StartsWith('@')) value = "'" + value;
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+
+        var csv = new System.Text.StringBuilder("时间,发起时间,会话ID,客户端,追踪摘要,对话摘要,辅助请求候选,路由,模型,上游模型,输入Token,输出Token,缓存读取,缓存写入,耗时毫秒,状态,金额\r\n");
+        foreach (var item in Snapshot().Where(i => since is null || i.Time >= since.Value).OrderByDescending(i => i.Time))
+        {
+            var cost = Pricing.Cost(cfg, item.Route, item.Target, item.Prompt, item.Completion, item.CacheRead, item.CacheWrite, item.Time);
+            csv.AppendJoin(',', Cell(item.Time.ToString("yyyy-MM-dd HH:mm:ss")), Cell(item.StartedAt?.ToString("O") ?? ""),
+                Cell(item.SessionId), Cell(item.Client), Cell(item.TraceId), Cell(item.DialogId),
+                item.DialogIdMissing ? "true" : "false", Cell(item.Route), Cell(item.Model), Cell(item.Target),
+                item.Prompt.ToString(CultureInfo.InvariantCulture), item.Completion.ToString(CultureInfo.InvariantCulture),
+                item.CacheRead.ToString(CultureInfo.InvariantCulture), item.CacheWrite.ToString(CultureInfo.InvariantCulture),
+                item.Ms.ToString(CultureInfo.InvariantCulture), item.Status.ToString(CultureInfo.InvariantCulture),
+                cost.ToString(CultureInfo.InvariantCulture)).Append("\r\n");
+        }
+        return csv.ToString();
+    }
+
     private static DateTime BucketStart(DateTime time, TimeSpan span)
     {
         var minutes = Math.Max(1, span.TotalMinutes);
@@ -239,7 +365,7 @@ public static class UsageStats
     private static string BucketLabel(DateTime start, TimeSpan span)
         => span.TotalHours >= 24 ? start.ToString("yyyy-MM-dd") : start.ToString("MM-dd HH:mm");
 
-    private static UsageRow BuildRow(string key, List<UsageRecord> items, AppConfig cfg, long order = 0)
+    private static UsageRow BuildRow(string key, List<UsageRecord> items, AppConfig cfg, long order = 0, string id = "")
     {
         decimal cost = 0;
         // 计价只认真实名（价格表配的是上游真实模型名）；分组键另有其人
@@ -249,6 +375,7 @@ public static class UsageStats
 
         return new UsageRow
         {
+            Id = id,
             Key = key,
             Requests = items.Count,
             Prompt = items.Sum(i => i.Prompt),
@@ -287,8 +414,11 @@ public static class UsageStats
 
     public static void Clear()
     {
-        lock (Gate) Items.Clear();
-        try { if (System.IO.File.Exists(FilePath)) System.IO.File.Delete(FilePath); } catch { }
+        lock (Gate)
+        {
+            Items.Clear();
+            try { if (System.IO.File.Exists(FilePath)) System.IO.File.Delete(FilePath); } catch { }
+        }
         Changed?.Invoke();
     }
 }

@@ -34,14 +34,47 @@ public static class WindowChrome
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO { public int Size; public RECT Monitor, Work; public int Flags; }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+    public static void CenterOnOwner(Window window)
+    {
+        if (window.WindowStartupLocation != WindowStartupLocation.CenterOwner ||
+            window.Owner is not { IsVisible: true, WindowState: not WindowState.Minimized } owner) return;
+
+        var hwnd = new WindowInteropHelper(window).Handle;
+        var ownerHwnd = new WindowInteropHelper(owner).Handle;
+        if (hwnd == IntPtr.Zero || ownerHwnd == IntPtr.Zero ||
+            !GetWindowRect(hwnd, out var bounds) || !GetWindowRect(ownerHwnd, out var parent)) return;
+
+        var info = new MONITORINFO { Size = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(MonitorFromWindow(ownerHwnd, 2), ref info)) return;
+        var width = bounds.Right - bounds.Left;
+        var height = bounds.Bottom - bounds.Top;
+        var x = parent.Left + (parent.Right - parent.Left - width) / 2;
+        var y = parent.Top + (parent.Bottom - parent.Top - height) / 2;
+        x = Math.Max(info.Work.Left, Math.Min(x, info.Work.Right - width));
+        y = Math.Max(info.Work.Top, Math.Min(y, info.Work.Bottom - height));
+        SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+    }
+
     private static int Rgb(int r, int g, int b) => (b << 16) | (g << 8) | r;
 
-    public static void Apply(Window window)
+    public static void Apply(Window window, bool hideBorder = false)
     {
-        ApplyCore(window);
+        ApplyCore(window, hideBorder);
 
-        window.SourceInitialized += (_, _) => ApplyCore(window);
-        window.Loaded += (_, _) => ApplyCore(window);
+        window.SourceInitialized += (_, _) => ApplyCore(window, hideBorder);
+        window.Loaded += (_, _) => ApplyCore(window, hideBorder);
     }
 
     /// <summary>
@@ -67,7 +100,7 @@ public static class WindowChrome
         }
     }
 
-    private static void ApplyCore(Window window)
+    private static void ApplyCore(Window window, bool hideBorder)
     {
         try
         {
@@ -76,7 +109,9 @@ public static class WindowChrome
 
             var round = 2;
             var lightFrame = 0;              // 0 = 浅色边框：程序是浅色界面，别让系统深色模式把框线染黑
-            var border = Rgb(0xE2, 0xE8, 0xF1);
+            // 系统的「无边框」在部分版本/缩放下仍会留下深色边；与其他程序一致显式着浅色，
+            // 对上游表单使用窗口背景色，使原生细边与背景融合，同时保留系统标题栏和圆角。
+            var border = hideBorder ? Rgb(0xF2, 0xF6, 0xFB) : Rgb(0xE2, 0xE8, 0xF1);
             var caption = Rgb(0xF2, 0xF6, 0xFB);
             var text = Rgb(0x1B, 0x1B, 0x1B);
 

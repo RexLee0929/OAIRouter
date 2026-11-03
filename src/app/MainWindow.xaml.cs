@@ -28,6 +28,7 @@ public partial class MainWindow : Window
     private UsageGroup _group = UsageGroup.Time;
     private TimeSpan _bucket = TimeSpan.FromDays(1);
     private int _usageDirty;
+    private readonly HashSet<string> _expandedSessions = new(StringComparer.Ordinal);
     private bool _routeAsc = true;
     private bool _mapAsc = true;
     private bool _serviceRunning;
@@ -44,7 +45,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = this;
 
-        Title = $"{Brand.Name} {Brand.Version}";
+        Title = $"{Brand.Name}{(App.IsDev ? " Dev" : "")} {Brand.Version}";
         Icon = BrandIcon.Source;   // 取 ico 里最大的一帧，别让系统拿首帧去放大（规范 §二）
 
         // 规范尺寸 1280×820；小屏（1366×768）或高缩放下不能溢出工作区。
@@ -60,6 +61,13 @@ public partial class MainWindow : Window
         CommandBindings.Add(new CommandBinding(ShellCommands.ClearLog, (_, _) => ArmClearLog(ClearLogButton)));
         CommandBindings.Add(new CommandBinding(ShellCommands.Quit, (_, _) => App.Quit()));
 
+        var defaults = new[] { 88d, 104d, 180d, 110d, 82d };
+        for (var i = 0; i < defaults.Length; i++)
+        {
+            var width = _cfg.RouteColumnWidths is { Length: 5 } ? _cfg.RouteColumnWidths[i] : defaults[i];
+            RouteHeader.ColumnDefinitions[i].Width = new GridLength(double.IsFinite(width) ? Math.Clamp(width, 50, 2000) : defaults[i]);
+        }
+
         RouteItems.ItemsSource = _cfg.Routes;
         MapItems.ItemsSource = _cfg.ModelMap;
         LogList.ItemsSource = LogStore.Instance.Items;
@@ -71,9 +79,15 @@ public partial class MainWindow : Window
         MinTokenBox.Text = _cfg.MinOutputTokens.ToString();
         MaxTokenBox.Text = _cfg.MaxOutputTokens.ToString();
         AutoStartBox.IsChecked = Autostart.IsEnabled();
+        ClientBox.ItemsSource = new[] { "Auto", "WorkBuddy", "DeepSeek Harness" };
+        ClientBox.SelectedIndex = _cfg.ClientType?.Trim().ToLowerInvariant() switch { "workbuddy" => 1, "deepseek" or "harness" or "deepseek-harness" => 2, _ => 0 };
+        DiagnosticsBox.IsChecked = _cfg.ExperimentalDiagnostics;
+        DiagnosticsHint.Text = $"诊断默认关闭，不记录正文或密钥。独立诊断日志：{LogStore.Instance.DiagnosticsFile}";
 
         BucketBox.ItemsSource = new[] { "按日", "12 小时", "6 小时", "1 小时", "30 分钟", "15 分钟" };
         BucketBox.SelectedIndex = 0;
+        UsageRangeBox.ItemsSource = new[] { "全部时间", "过去 1 小时", "过去 6 小时", "过去 12 小时", "过去 24 小时", "过去 7 天", "过去 30 天" };
+        UsageRangeBox.SelectedIndex = 0;
 
         _cfg.Routes.CollectionChanged += OnCollectionChanged;
         _cfg.ModelMap.CollectionChanged += OnCollectionChanged;
@@ -410,6 +424,20 @@ public partial class MainWindow : Window
         catch { ShowToast("复制失败", warn: true); }
     }
 
+    private void OnClientChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready) return;
+        _cfg.ClientType = ClientBox.SelectedIndex switch { 1 => "workbuddy", 2 => "deepseek-harness", _ => "auto" };
+        QueueSave();
+    }
+
+    private void OnDiagnosticsChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_ready) return;
+        _cfg.ExperimentalDiagnostics = DiagnosticsBox.IsChecked == true;
+        QueueSave();
+    }
+
     private void OnAutoStartChanged(object sender, RoutedEventArgs e)
     {
         if (!_ready) return;
@@ -442,46 +470,40 @@ public partial class MainWindow : Window
 
     private void OnRuleChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName is nameof(RouteRule.BalanceDisplay) or nameof(RouteRule.BalanceRefreshing)) return;
         QueueSave();
         UpdateStats();
+    }
+
+    private void OnUpstreamSettings(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: RouteRule route }) return;
+        if (route.BalanceRefreshing) { ShowStatusFlash("余额查询中，请稍后编辑"); return; }
+        var window = new UpstreamSettingsWindow(route, prefix => _cfg.Routes.Any(r => r != route && string.Equals(r.Prefix.Trim('/'), prefix, StringComparison.OrdinalIgnoreCase))) { Owner = this };
+        if (window.ShowDialog() == true) { route.BalanceDisplay = "—"; QueueSave(); }
+    }
+
+    private async void OnRefreshBalance(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: RouteRule route } || route.BalanceRefreshing) return;
+        route.BalanceRefreshing = true;
+        route.BalanceDisplay = "查询中…";
+        try { route.BalanceDisplay = await UpstreamSettingsWindow.QueryBalanceAsync(route); }
+        finally { route.BalanceRefreshing = false; }
     }
 
     private void OnAddRoute(object sender, RoutedEventArgs e) => AddRoute();
 
     private void AddRoute()
     {
-        if (_cfg.Routes.Any(r => r.IsEditing))
-        {
-            ShowStatusFlash("先把正在编辑的那一行填完或点对勾结束");
-            return;
-        }
-
-        // 插到最上面，方便立刻编辑；编辑完成后再按名称归位
-        _cfg.Routes.Insert(0, new RouteRule
-        {
-            Prefix = "route" + (_cfg.Routes.Count + 1),
-            Name = "新路由",
-            Upstream = "https://",
-            Mode = "responses",
-            IsEditing = true,
-        });
+        var route = new RouteRule { Mode = "responses" };
+        var window = new UpstreamSettingsWindow(route, prefix => _cfg.Routes.Any(r => string.Equals(r.Prefix.Trim('/'), prefix, StringComparison.OrdinalIgnoreCase)), true) { Owner = this };
+        if (window.ShowDialog() == true) _cfg.Routes.Insert(0, route);
     }
 
     private void OnToggleEditRoute(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: RouteRule rule }) return;
-
-        if (rule.IsEditing)
-        {
-            rule.IsEditing = false;
-            SortRoutes(true);            // 编辑完成后按名称归位
-            _routeAsc = false;
-            RouteSortBtn.Content = "名称 ↑";
-        }
-        else
-        {
-            rule.IsEditing = true;
-        }
+        OnUpstreamSettings(sender, e);
     }
 
     private void OnCopyRouteEndpoint(object sender, RoutedEventArgs e)
@@ -547,7 +569,8 @@ public partial class MainWindow : Window
 
     private void OnRemoveRouteRow(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: RouteRule rule }) _cfg.Routes.Remove(rule);
+        if (sender is Button { DataContext: RouteRule rule } button && InlineConfirm.Arm(button, "确认", () => _cfg.Routes.Remove(rule)))
+            ShowStatusFlash("再次点击确认删除该上游");
     }
 
     private void OnAddMap(object sender, RoutedEventArgs e) => AddMap();
@@ -600,7 +623,7 @@ public partial class MainWindow : Window
             Filter = "配置文件 (*.json)|*.json",
             FileName = $"{Brand.Name}-配置-{DateTime.Now:yyyyMMdd-HHmm}.json",
         };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(this) != true) return;
 
         try
         {
@@ -619,7 +642,7 @@ public partial class MainWindow : Window
         {
             Filter = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*",
         };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(this) != true) return;
 
         AppConfig? incoming;
         try
@@ -712,6 +735,10 @@ public partial class MainWindow : Window
         _cfg.MaxOutputTokens = fresh.MaxOutputTokens;
         _cfg.LogLimit = fresh.LogLimit;
         _cfg.AutoScrollLog = true;
+        _cfg.ClientType = fresh.ClientType;
+        _cfg.ExperimentalDiagnostics = fresh.ExperimentalDiagnostics;
+        ClientBox.SelectedIndex = 0;
+        DiagnosticsBox.IsChecked = false;
 
         PortBox.Text = _cfg.Port.ToString();
         MinTokenBox.Text = _cfg.MinOutputTokens.ToString();
@@ -737,15 +764,29 @@ public partial class MainWindow : Window
     {
         _cfg.Routes.Clear();
         _cfg.ModelMap.Clear();
-        _cfg.Routes.Add(new RouteRule { Prefix = "openai", Name = "OpenAI 官方", Upstream = "https://api.openai.com", Mode = "responses" });
+        _cfg.Routes.Add(new RouteRule { Prefix = "openai", Name = "OpenAI 官方", Upstream = "https://api.openai.com", Mode = "responses", BalanceType = "OpenAI" });
         ShowStatusFlash("已恢复默认规则");
+    }
+
+    private void OnRouteColumnDrag(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        var column = RouteHeader.ColumnDefinitions[Grid.GetColumn((UIElement)sender)];
+        column.Width = new GridLength(Math.Clamp(column.Width.Value + e.HorizontalChange, 50, 2000));
+    }
+
+    private void OnRouteColumnResize(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        _cfg.RouteColumnWidths = RouteHeader.ColumnDefinitions.Take(5).Select(c => c.Width.Value).ToArray();
+        _saveTimer.Stop();
+        if (!ConfigStore.Save(_cfg)) ShowStatusFlash("列宽保存失败");
     }
 
     /// <summary>滚动条出现时给表头补同样的右边距，避免列错位。</summary>
     private void OnTableScroll(object sender, ScrollChangedEventArgs e)
     {
-        var routePad = RouteScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? 17 : 0;
-        RouteHeader.Margin = new Thickness(0, 0, routePad, 2);
+        var routePad = RouteScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? SystemParameters.VerticalScrollBarWidth : 0;
+        RouteHeaderScroll.Margin = new Thickness(0, 0, routePad, 0);
+        RouteHeaderScroll.ScrollToHorizontalOffset(RouteScroll.HorizontalOffset);
 
         var mapPad = MapScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? 17 : 0;
         MapHeader.Margin = new Thickness(0, 0, mapPad, 2);
@@ -782,6 +823,7 @@ public partial class MainWindow : Window
         MarkGroupButton(GroupSession, _group == UsageGroup.Session);
         MarkGroupButton(GroupTime, _group == UsageGroup.Time);
         BucketBox.Visibility = _group == UsageGroup.Time ? Visibility.Visible : Visibility.Collapsed;
+        UsageRangeBox.Visibility = _group == UsageGroup.Time ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void MarkGroupButton(Button button, bool active)
@@ -820,25 +862,100 @@ public partial class MainWindow : Window
         MarkGroupButton(GroupSession, group == UsageGroup.Session);
         MarkGroupButton(GroupTime, group == UsageGroup.Time);
         BucketBox.Visibility = group == UsageGroup.Time ? Visibility.Visible : Visibility.Collapsed;
+        UsageRangeBox.Visibility = group == UsageGroup.Time ? Visibility.Collapsed : Visibility.Visible;
         RefreshUsage();
         UsageScroll.ScrollToTop();
     }
 
+    private DateTime? UsageSince() => _group == UsageGroup.Time ? null : UsageRangeBox.SelectedIndex switch
+    {
+        1 => DateTime.Now.AddHours(-1),
+        2 => DateTime.Now.AddHours(-6),
+        3 => DateTime.Now.AddHours(-12),
+        4 => DateTime.Now.AddHours(-24),
+        5 => DateTime.Now.AddDays(-7),
+        6 => DateTime.Now.AddDays(-30),
+        _ => null,
+    };
+
+    private void OnUsageRangeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RefreshUsage();
+        UsageScroll.ScrollToTop();
+    }
+
+    private void OnExportUsage(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "CSV 文件 (*.csv)|*.csv",
+            FileName = $"{Brand.Name}-请求统计-{DateTime.Now:yyyyMMdd-HHmm}.csv",
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            File.WriteAllText(dialog.FileName, UsageStats.ExportCsv(_cfg, UsageSince()), new System.Text.UTF8Encoding(true));
+            ShowStatusFlash("请求统计已导出");
+        }
+        catch (Exception ex)
+        {
+            ShowStatusFlash($"导出失败：{ex.Message}");
+        }
+    }
+
     private void OnUsageChanged() => Interlocked.Exchange(ref _usageDirty, 1);
+
+    private sealed class SessionDisplayRow
+    {
+        public required string SessionId { get; init; }
+        public required UsageRow Row { get; init; }
+        public bool IsParent { get; init; }
+        public bool IsExpanded { get; init; }
+        public string Title => $"{(IsExpanded ? "▾" : "▸")} {Row.Key}";
+    }
+
+    private void OnToggleSession(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: SessionDisplayRow { IsParent: true } row }) return;
+        if (!_expandedSessions.Add(row.SessionId)) _expandedSessions.Remove(row.SessionId);
+        RefreshUsage();
+    }
 
     private void RefreshUsage()
     {
         var offset = UsageScroll.VerticalOffset;
-        UsageItems.ItemsSource = UsageStats.Group(_group, _cfg, _bucket);
+        List<UsageRow> rows;
+        var isSession = _group == UsageGroup.Session;
+        UsageItems.Visibility = isSession ? Visibility.Collapsed : Visibility.Visible;
+        SessionUsageItems.Visibility = isSession ? Visibility.Visible : Visibility.Collapsed;
+        if (isSession)
+        {
+            var groups = UsageStats.GroupSessions(_cfg, UsageSince());
+            rows = groups.Select(g => g.Total).ToList();
+            var displayRows = new List<SessionDisplayRow>();
+            foreach (var group in groups)
+            {
+                var expanded = _expandedSessions.Contains(group.Id);
+                displayRows.Add(new SessionDisplayRow { SessionId = group.Id, Row = group.Total, IsParent = true, IsExpanded = expanded });
+                if (expanded)
+                    displayRows.AddRange(group.Dialogs.Select(dialog => new SessionDisplayRow { SessionId = group.Id, Row = dialog }));
+            }
+            SessionUsageItems.ItemsSource = displayRows;
+        }
+        else
+        {
+            rows = UsageStats.Group(_group, _cfg, _bucket, UsageSince());
+            UsageItems.ItemsSource = rows;
+        }
         if (UsagePanel.IsVisible && offset > 0)
         {
             UsageScroll.UpdateLayout();
             UsageScroll.ScrollToVerticalOffset(offset);
         }
 
-        var summary = UsageStats.Summary(_cfg);
-        var money = summary.Cost > 0 ? $" · {UsageStats.Money(summary.Cost)}" : "";
-        UsageSummary.Text = $"{summary.Requests} 次 · 输入 {summary.Prompt:N0} · 输出 {summary.Completion:N0}{money}";
+        var cost = rows.Sum(r => r.Cost);
+        var money = cost > 0 ? $" · {UsageStats.Money(cost)}" : "";
+        UsageSummary.Text = $"{rows.Sum(r => r.Requests)} 次 · 输入 {rows.Sum(r => r.Prompt):N0} · 输出 {rows.Sum(r => r.Completion):N0}{money}";
     }
 
     private void OnClearLog(object sender, RoutedEventArgs e)
@@ -991,7 +1108,7 @@ public partial class MainWindow : Window
             _tray = new Forms.NotifyIcon
             {
                 Icon = BrandIcon.DrawingIcon(size),
-                Text = $"{Brand.Name} {Brand.Version}",
+                Text = $"{Brand.Name}{(App.IsDev ? " Dev" : "")} {Brand.Version}",
                 Visible = true,
             };
 

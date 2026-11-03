@@ -24,6 +24,7 @@ public sealed class ProxyService
     private readonly HttpClient _http = new(new SocketsHttpHandler
     {
         AutomaticDecompression = DecompressionMethods.All,
+        AllowAutoRedirect = false,
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         ConnectTimeout = TimeSpan.FromSeconds(20),
     })
@@ -79,7 +80,7 @@ public sealed class ProxyService
             var msg = ex.Message.Contains("address already in use", StringComparison.OrdinalIgnoreCase)
                 ? $"端口 {cfg.Port} 已被占用，请换一个端口"
                 : ex.Message;
-            LogStore.Instance.Error("服务", $"启动失败：{msg}");
+            LogStore.Instance.Error("服务", "启动失败");
             Notify?.Invoke($"服务启动失败：{msg}");
             return (false, msg);
         }
@@ -93,9 +94,9 @@ public sealed class ProxyService
             await _app.StopAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
             await _app.DisposeAsync().ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            LogStore.Instance.Warn("服务", $"停止时出现异常：{ex.Message}");
+            LogStore.Instance.Warn("服务", "停止时出现异常");
         }
         finally
         {
@@ -152,7 +153,7 @@ public sealed class ProxyService
                     ["type"] = "route_not_found",
                 },
             }.ToJsonString());
-            LogStore.Instance.Warn("路由", $"未匹配前缀 /{prefix}");
+            LogStore.Instance.Warn("路由", "未匹配路由");
             return;
         }
 
@@ -160,11 +161,20 @@ public sealed class ProxyService
                      && HttpMethods.IsPost(ctx.Request.Method);
 
         if (!ctx.Request.Headers.ContainsKey("Authorization"))
-            LogStore.Instance.Warn("请求", $"{route.Prefix}{rest} 未携带 Authorization 头（客户端的 API Key 可能为空）");
+            LogStore.Instance.Warn("请求", "未携带 Authorization 头");
 
         var startedAt = DateTime.Now;
-        // WorkBuddy 模型请求携带对话 ID。仅用作本地统计，不转发给上游。
-        var conversationId = ReadConversationId(ctx);
+        var conversationId = "";
+        var client = "unknown";
+        var sessionSource = "none";
+        var hasTraceId = false;
+        var hasRequestId = false;
+        var traceId = "";
+        var dialogId = "";
+        var dialogIdMissing = false;
+        var diagnosticDetails = "";
+        var diagnosticMode = "unknown";
+        var diagnosticBodyBytes = -1;
         var sw = Stopwatch.StartNew();
         Interlocked.Increment(ref TotalRequests);
 
@@ -181,8 +191,17 @@ public sealed class ProxyService
             var isJson = isChat || contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)
                 || contentType.Split(';')[0].Trim().EndsWith("+json", StringComparison.OrdinalIgnoreCase);
             var payload = isJson ? await ReadBodyAsync(ctx) : null;
+            (client, conversationId, sessionSource, hasTraceId, hasRequestId) = IdentifyClient(ctx, payload, cfg.ClientType);
+            if (client == "workbuddy")
+                (traceId, dialogId, dialogIdMissing) = IdentifyWorkBuddyTurn(ctx, payload);
+            if (cfg.ExperimentalDiagnostics) diagnosticDetails = DescribeIdentity(ctx, payload);
             var requestModel = payload is { Length: > 0 } ? ReadModel(payload) : "";
             var mode = ResolveMode(cfg, requestModel, route);
+            if (cfg.ExperimentalDiagnostics)
+            {
+                diagnosticBodyBytes = payload?.Length ?? -1;
+                diagnosticMode = mode.ToLowerInvariant() switch { "responses" => "responses", "rewrite" => "rewrite", "chat" => "chat", _ => "other" };
+            }
             alias = requestModel;
             target = ResolveModel(cfg, alias);
 
@@ -209,12 +228,12 @@ public sealed class ProxyService
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
         {
             cancelled = true;
-            LogStore.Instance.Info("转发", $"{route.Prefix} 客户端已断开（不算上游失败）");
+            LogStore.Instance.Info("转发", "客户端已断开（不算上游失败）");
         }
         catch (Exception ex)
         {
             failed = true;
-            LogStore.Instance.Error("转发", $"{route.Prefix} {ex.GetType().Name}: {ex.Message}");
+            LogStore.Instance.Error("转发", "请求转发失败");
             if (ctx.Response.HasStarted)
             {
                 // 流已开始时无法改状态码；主动中止，避免客户端误以为响应完整。
@@ -239,9 +258,24 @@ public sealed class ProxyService
             Interlocked.Add(ref TotalMs, sw.ElapsedMilliseconds);
             if (status >= 400 && status != 499) Interlocked.Increment(ref FailedRequests);
 
-            LogStore.Instance.Request(route.Prefix, alias, target, status, sw.ElapsedMilliseconds);
+            if (status >= 400)
+                LogStore.Instance.Warn("请求", $"失败（HTTP {status}）");
+            else
+                LogStore.Instance.Request(route.Prefix, alias, target, status, sw.ElapsedMilliseconds);
+            if (cfg.ExperimentalDiagnostics)
+            {
+                static string Count(JsonObject? obj, string first, string second)
+                {
+                    var value = obj?[first] ?? obj?[second];
+                    return value is JsonValue number && number.TryGetValue<long>(out var count) && count >= 0 ? count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown";
+                }
+                var selected = conversationId.Length >= 20 ? conversationId[..20] : "missing";
+                var error = cancelled ? "cancelled" : failed ? "proxy_or_stream" : status >= 400 ? "http_error" : "none";
+                LogStore.Instance.Diagnostic($"client={client} session_source={sessionSource} session_stat_sha256_20={selected} trace_present={hasTraceId} request_id_present={hasRequestId} mode={diagnosticMode} body_bytes={diagnosticBodyBytes} status={status} cancelled={cancelled} error_category={error} duration_ms={sw.ElapsedMilliseconds} response_stream={ctx.Response.ContentType?.StartsWith("text/event-stream", StringComparison.OrdinalIgnoreCase) == true} usage_present={usage is not null} input_tokens={Count(usage, "input_tokens", "prompt_tokens")} output_tokens={Count(usage, "output_tokens", "completion_tokens")} {diagnosticDetails}");
+            }
             // 展示名用映射名（alias），计价用真实名（target）——两列分开存，别把不同上游混在一起
-            RecordUsage(route.Prefix, alias, target, usage, sw.ElapsedMilliseconds, status, conversationId, startedAt);
+            RecordUsage(route.Prefix, alias, target, usage, sw.ElapsedMilliseconds, status, conversationId, startedAt,
+                        client, traceId, dialogId, dialogIdMissing);
         }
     }
 
@@ -282,12 +316,12 @@ public sealed class ProxyService
                     ["type"] = "translate_error",
                 },
             }.ToJsonString());
-            LogStore.Instance.Error("翻译", $"转换失败：{ex.GetType().Name} {ex.Message}");
+            LogStore.Instance.Error("翻译", "请求转换失败");
             return (alias, target, null, false);
         }
         var url = Combine(route.Upstream, "/v1/responses");
 
-        var resp = await SendResponsesAsync(ctx, url, body);
+        var resp = await SendResponsesAsync(ctx, route, url, body);
         try
         {
         var status = (int)resp.StatusCode;
@@ -300,8 +334,8 @@ public sealed class ProxyService
             {
                 resp.Dispose();
                 body.Remove("reasoning");
-                LogStore.Instance.Info("翻译", $"{target} 不支持思考参数，本次已自动去掉后重试；建议把该模型映射的「模式」改成 chat");
-                resp = await SendResponsesAsync(ctx, url, body);
+                LogStore.Instance.Info("翻译", "上游不支持思考参数，本次已去掉后重试");
+                resp = await SendResponsesAsync(ctx, route, url, body);
                 status = (int)resp.StatusCode;
             }
             else
@@ -310,8 +344,7 @@ public sealed class ProxyService
                 ctx.Response.StatusCode = status;
                 ctx.Response.ContentType = "application/json; charset=utf-8";
                 await ctx.Response.WriteAsync(probe);
-                var why = UpstreamError.Explain(probe);
-                LogStore.Instance.Warn("上游", $"{route.Prefix} 拒绝：{(why.Length > 0 ? why + " ｜ 原文：" : "")}{Truncate(probe, 120)}");
+                LogStore.Instance.Warn("上游", $"拒绝请求（HTTP {status}）");
                 resp.Dispose();
                 return (alias, target, null, false);
             }
@@ -321,16 +354,12 @@ public sealed class ProxyService
         {
             var err = await resp.Content.ReadAsStringAsync(ctx.RequestAborted);
             if (status == 524)
-                LogStore.Instance.Warn("上游", $"{route.Prefix} 返回 524：上游网关等待后端超时，请联系上游服务商排查");
+                LogStore.Instance.Warn("上游", "HTTP 524：上游网关等待后端超时");
             ctx.Response.StatusCode = status;
             ctx.Response.ContentType = "application/json; charset=utf-8";
             await ctx.Response.WriteAsync(err);
 
-            var explain = UpstreamError.Explain(err);
-            var detail = explain.Length > 0
-                ? $"{explain} ｜ 原文：{Truncate(err, 120)}"
-                : Truncate(err, 160);
-            LogStore.Instance.Warn("上游", $"{route.Prefix} 拒绝：{detail}");
+            LogStore.Instance.Warn("上游", $"拒绝请求（HTTP {status}）");
             resp.Dispose();
             return (alias, target, null, false);
         }
@@ -359,7 +388,7 @@ public sealed class ProxyService
 
             await translator.EndAsync();
             if (translator.Failed)
-                LogStore.Instance.Warn("上游", $"{route.Prefix} 流式响应失败或提前中断");
+                LogStore.Instance.Warn("上游", "流式响应失败或提前中断");
             resp.Dispose();
             return (alias, target, translator.Usage, translator.Failed);
         }
@@ -409,7 +438,7 @@ public sealed class ProxyService
         // 透传模式不解析请求体，这里补一次，否则统计里没有模型名
         if (string.IsNullOrWhiteSpace(model) && payload.Length > 0)
             model = ReadModel(payload);
-        CopyAuth(ctx, req);
+        CopyAuth(ctx, req, route);
 
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
 
@@ -440,12 +469,7 @@ public sealed class ProxyService
 
         if ((int)resp.StatusCode >= 400)
         {
-            var bare = rest.TrimEnd('/') is "/v1" or "";
-            var hint = bare
-                ? "（请求落在了裸路径上：如果客户端开了「自定义协议」，它不会自动补 /chat/completions，请关掉该选项）"
-                : "";
-            var timeoutHint = (int)resp.StatusCode == 524 ? "（上游网关等待后端超时，请联系上游服务商排查）" : "";
-            LogStore.Instance.Warn("上游", $"{route.Prefix}{rest} → {(int)resp.StatusCode}{hint}{timeoutHint}");
+            LogStore.Instance.Warn("上游", $"请求失败（HTTP {(int)resp.StatusCode}）");
         }
 
         return (model ?? "", model ?? "", returnUsage);
@@ -532,13 +556,13 @@ public sealed class ProxyService
         return string.IsNullOrWhiteSpace(map?.Mode) ? route.Mode : map!.Mode.Trim();
     }
 
-    private async Task<HttpResponseMessage> SendResponsesAsync(HttpContext ctx, string url, JsonObject body)
+    private async Task<HttpResponseMessage> SendResponsesAsync(HttpContext ctx, RouteRule route, string url, JsonObject body)
     {
         using var req = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
         };
-        CopyAuth(ctx, req);
+        CopyAuth(ctx, req, route);
         return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
     }
 
@@ -550,23 +574,183 @@ public sealed class ProxyService
                && (t.Contains("not supported") || t.Contains("unsupported"));
     }
 
-    private static string ReadConversationId(HttpContext ctx)
+    private static (string client, string session, string source, bool trace, bool request) IdentifyClient(
+        HttpContext ctx, byte[]? payload, string? configuredClient)
     {
-        // 禁止把每次请求都变的 request/message ID 冒充会话 ID。
-        if (!ctx.Request.Headers.TryGetValue("X-Conversation-ID", out var values) || values.Count != 1)
-            return "";
-        var value = values[0]?.Trim() ?? "";
-        return Guid.TryParseExact(value, "D", out var id) || Guid.TryParseExact(value, "N", out id)
-            ? id.ToString("D") : "";
+        var client = (configuredClient ?? "auto").Trim().ToLowerInvariant() switch
+        {
+            "workbuddy" => "workbuddy", "deepseek" or "harness" or "deepseek-harness" => "deepseek-harness", _ => "auto"
+        };
+        if (client == "auto")
+        {
+            var agent = ctx.Request.Headers.UserAgent.ToString();
+            client = agent.Contains("workbuddy", StringComparison.OrdinalIgnoreCase) ? "workbuddy"
+                : agent.Contains("deepseek", StringComparison.OrdinalIgnoreCase) && agent.Contains("harness", StringComparison.OrdinalIgnoreCase) ? "deepseek-harness" : "unknown";
+        }
+
+        static string Normalize(string? value)
+        {
+            value = value?.Trim();
+            return Guid.TryParseExact(value, "D", out var id) || Guid.TryParseExact(value, "N", out id)
+                ? id.ToString("D") : "";
+        }
+
+        var session = "";
+        var source = "none";
+        if (ctx.Request.Headers.TryGetValue("X-Conversation-ID", out var values) && values.Count == 1)
+        {
+            session = Normalize(values[0]);
+            if (session.Length > 0) source = "header";
+        }
+        var trace = ctx.Request.Headers.ContainsKey("X-Trace-ID");
+        var request = ctx.Request.Headers.ContainsKey("X-Conversation-Request-ID");
+        try
+        {
+            if (payload is { Length: > 0 } && JsonNode.Parse(payload) is JsonObject body)
+            {
+                // 只检查明确的元数据位置，不遍历消息内容。
+                foreach (var metadata in new[] { body, body["metadata"] as JsonObject })
+                {
+                    if (metadata is null) continue;
+                    trace |= metadata.ContainsKey("traceId");
+                    request |= metadata.ContainsKey("conversationRequestId");
+                    if (session.Length == 0 && metadata["conversationId"] is JsonValue value
+                        && value.TryGetValue<string>(out var text))
+                    {
+                        session = Normalize(text);
+                        if (session.Length > 0) source = ReferenceEquals(metadata, body) ? "body" : "metadata";
+                    }
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException) { }
+        if (session.Length > 0)
+            session = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("conversation:" + session))).ToLowerInvariant();
+        return (client, session, source, trace, request);
+    }
+
+    // 会话识别只检查协议元数据。请求/trace 摘要使用本进程随机密钥，避免保存原始标识，
+    // 也避免不同进程的历史 trace 被意外关联；它们是关联线索，不是已证明的用户轮次。
+    private static readonly byte[] UsageIdentityKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+    private static (string traceId, string dialogId, bool dialogIdMissing) IdentifyWorkBuddyTurn(HttpContext ctx, byte[]? payload)
+    {
+        JsonObject body;
+        try
+        {
+            if (payload is not { Length: > 0 } || JsonNode.Parse(payload) is not JsonObject parsed)
+                return ("", "", false);
+            body = parsed;
+        }
+        catch (System.Text.Json.JsonException) { return ("", "", false); }
+
+        // 任一位置的字段无效、重复或不一致时，禁止据此推断。
+        (Guid? id, bool missing, bool valid) ReadIdentity(string header, string field)
+        {
+            var found = false;
+            var valid = true;
+            Guid? first = null;
+            void Add(string? value)
+            {
+                found = true;
+                if (!Guid.TryParseExact(value?.Trim(), "D", out var id) && !Guid.TryParseExact(value?.Trim(), "N", out id))
+                {
+                    valid = false;
+                    return;
+                }
+                if (first is not null && first != id) valid = false;
+                first ??= id;
+            }
+            if (ctx.Request.Headers.TryGetValue(header, out var headers))
+            {
+                if (headers.Count != 1) { found = true; valid = false; }
+                else Add(headers[0]);
+            }
+            foreach (var obj in new[] { body, body["metadata"] as JsonObject })
+            {
+                if (obj is null || !obj.ContainsKey(field)) continue;
+                if (obj[field] is JsonValue value && value.TryGetValue<string>(out var text)) Add(text);
+                else { found = true; valid = false; }
+            }
+            return (first, !found, valid);
+        }
+
+        var conversation = ReadIdentity("X-Conversation-ID", "conversationId");
+        var trace = ReadIdentity("X-Trace-ID", "traceId");
+        var request = ReadIdentity("X-Conversation-Request-ID", "conversationRequestId");
+        if (!conversation.valid || conversation.missing || !trace.valid) return ("", "", false);
+        // WorkBuddy 的辅助请求可能携带非 UUID 请求头；它不是“缺失”，只能作为同 trace 的
+        // 唯一主请求的候选关联。多值、正文同时提供、空值等情况保持未知，不能据此合并。
+        var unrecognizedRequest = !request.valid &&
+            ctx.Request.Headers.TryGetValue("X-Conversation-Request-ID", out var requestHeaders) &&
+            requestHeaders.Count == 1 && !string.IsNullOrWhiteSpace(requestHeaders[0]) &&
+            !body.ContainsKey("conversationRequestId") &&
+            !(body["metadata"] is JsonObject metadata && metadata.ContainsKey("conversationRequestId"));
+        if (!request.valid && !unrecognizedRequest) return ("", "", false);
+        static string Digest(string domain, Guid? id)
+        {
+            if (id is null) return "";
+            var bytes = Encoding.UTF8.GetBytes(domain + ":" + id.Value.ToString("D"));
+            return Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(UsageIdentityKey, bytes)).ToLowerInvariant();
+        }
+        return (Digest("trace", trace.id), Digest("dialog", request.id), request.missing || unrecognizedRequest);
+    }
+
+    // 仅在本进程生命周期内关联诊断标识，避免无密钥哈希被离线枚举。
+    private static readonly byte[] DiagnosticKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+    private static string DescribeIdentity(HttpContext ctx, byte[]? payload)
+    {
+        var fields = new List<string>();
+        var sessions = new List<Guid>();
+        void AddId(string location, string? text, bool conversation)
+        {
+            if (!Guid.TryParseExact(text?.Trim(), "D", out var id) && !Guid.TryParseExact(text?.Trim(), "N", out id)) return;
+            if (conversation) sessions.Add(id);
+            var hash = System.Security.Cryptography.HMACSHA256.HashData(DiagnosticKey, Encoding.UTF8.GetBytes(id.ToString("D")));
+            fields.Add($"{location}={Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant()}");
+        }
+        void Header(string name, string location, bool conversation)
+        {
+            if (ctx.Request.Headers.TryGetValue(name, out var values) && values.Count == 1)
+                AddId(location, values[0], conversation);
+        }
+        Header("X-Conversation-ID", "header_conversation", true);
+        Header("X-Trace-ID", "header_trace", false);
+        Header("X-Conversation-Request-ID", "header_request", false);
+        var requestStream = "unknown";
+        var messageCount = -1;
+        var toolCount = -1;
+        try
+        {
+            if (payload is { Length: > 0 } && JsonNode.Parse(payload) is JsonObject body)
+            {
+                void ObjectFields(JsonObject? obj, string location)
+                {
+                    if (obj is null) return;
+                    foreach (var (name, suffix, conversation) in new[] { ("conversationId", "conversation", true), ("traceId", "trace", false), ("conversationRequestId", "request", false) })
+                        if (obj[name] is JsonValue value && value.TryGetValue<string>(out var text)) AddId(location + "_" + suffix, text, conversation);
+                }
+                ObjectFields(body, "body");
+                ObjectFields(body["metadata"] as JsonObject, "metadata");
+                if (body["stream"] is JsonValue stream && stream.TryGetValue<bool>(out var enabled)) requestStream = enabled ? "true" : "false";
+                if (body["messages"] is JsonArray messages) messageCount = messages.Count;
+                if (body["tools"] is JsonArray tools) toolCount = tools.Count;
+            }
+        }
+        catch (System.Text.Json.JsonException) { }
+        var agreement = sessions.Count < 2 ? "unknown" : sessions.Distinct().Count() == 1 ? "same" : "different";
+        return $"id_digest=hmac_sha256_64_process phase=completed is_chat={HttpMethods.IsPost(ctx.Request.Method) && (ctx.Request.Path.Value?.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) == true)} request_stream={requestStream} message_count={messageCount} tool_count={toolCount} conversation_agreement={agreement} {string.Join(" ", fields)}";
     }
 
     /// <summary>把 usage 记进统计。兼容 Responses（input/output）与 Chat（prompt/completion）两种形状。</summary>
     /// <param name="model">展示名：映射名（客户端填的别名），界面按它分组。</param>
     /// <param name="target">真实名：发给上游的模型名，计价用它。</param>
     private static void RecordUsage(string route, string model, string target, JsonObject? usage, long ms, int status,
-                                    string conversationId, DateTime startedAt)
+                                    string conversationId, DateTime startedAt, string client, string traceId,
+                                    string dialogId, bool dialogIdMissing)
     {
-        if (usage is null) { UsageStats.Record(route, model, target, 0, 0, 0, 0, ms, status, conversationId, startedAt); return; }
+        if (usage is null) { UsageStats.Record(route, model, target, 0, 0, 0, 0, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing); return; }
 
         var prompt = usage["input_tokens"]?.GetValue<long?>()
                      ?? usage["prompt_tokens"]?.GetValue<long?>() ?? 0;
@@ -583,13 +767,27 @@ public sealed class ProxyService
         var cacheWrite = details?["cache_write_tokens"]?.GetValue<long?>()
                          ?? usage["cache_creation_input_tokens"]?.GetValue<long?>() ?? 0;
 
-        UsageStats.Record(route, model, target, prompt, completion, cacheRead, cacheWrite, ms, status, conversationId, startedAt);
+        UsageStats.Record(route, model, target, prompt, completion, cacheRead, cacheWrite, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing);
     }
 
-    private static void CopyAuth(HttpContext ctx, HttpRequestMessage req)
+    private static void CopyAuth(HttpContext ctx, HttpRequestMessage req, RouteRule route)
     {
-        if (ctx.Request.Headers.TryGetValue("Authorization", out var auth))
-            req.Headers.TryAddWithoutValidation("Authorization", auth.ToString());
+        var authorization = ctx.Request.Headers.Authorization.ToString();
+        if (!string.IsNullOrEmpty(route.ProtectedUpstreamKey))
+        {
+            var local = SecretProtection.Unprotect(route.ProtectedLocalKey);
+            var upstream = SecretProtection.Unprotect(route.ProtectedUpstreamKey);
+            if (!string.IsNullOrEmpty(local) && !string.Equals(authorization, "Bearer " + local, StringComparison.Ordinal))
+                throw new InvalidOperationException("客户端 API Key 与此上游配置不匹配，已拒绝转发。");
+            if (req.RequestUri is not { } destination || (destination.Scheme != Uri.UriSchemeHttps && !(destination.Scheme == Uri.UriSchemeHttp && destination.IsLoopback)))
+                throw new InvalidOperationException("已配置上游密钥时只能使用 HTTPS 或本机 HTTP 地址。");
+            authorization = "Bearer " + upstream;
+        }
+        if ((!string.IsNullOrEmpty(authorization) || ctx.Request.Headers.ContainsKey("OpenAI-Organization") || ctx.Request.Headers.ContainsKey("OpenAI-Project"))
+            && (req.RequestUri is not { } uri || (uri.Scheme != Uri.UriSchemeHttps && !(uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback))))
+            throw new InvalidOperationException("包含认证信息的请求只能发送至 HTTPS 或本机 HTTP 地址。");
+        if (!string.IsNullOrEmpty(authorization))
+            req.Headers.TryAddWithoutValidation("Authorization", authorization);
         if (ctx.Request.Headers.TryGetValue("OpenAI-Organization", out var org))
             req.Headers.TryAddWithoutValidation("OpenAI-Organization", org.ToString());
         if (ctx.Request.Headers.TryGetValue("OpenAI-Project", out var proj))

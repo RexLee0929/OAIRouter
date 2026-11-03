@@ -14,6 +14,21 @@ public sealed class RouteRule : INotifyPropertyChanged
     private string _upstream = "";
     private string _mode = "responses";
     private bool _editing;
+    private string _balanceDisplay = "—";
+    private bool _balanceRefreshing;
+
+    [JsonIgnore]
+    public string BalanceDisplay { get => _balanceDisplay; set { _balanceDisplay = value; OnChanged(); } }
+    [JsonIgnore]
+    public bool BalanceRefreshing { get => _balanceRefreshing; set { _balanceRefreshing = value; OnChanged(); } }
+
+    public string BalanceType { get; set; } = "NewAPI";
+    public string BalanceUrl { get; set; } = "";
+    public string BalanceJsonPath { get; set; } = "data.quota";
+    public string BalanceUserId { get; set; } = "";
+    public string ProtectedBalanceKey { get; set; } = "";
+    public string ProtectedLocalKey { get; set; } = "";
+    public string ProtectedUpstreamKey { get; set; } = "";
 
     /// <summary>路径前缀，例如 openai 对应 http://127.0.0.1:端口/openai/v1/chat/completions</summary>
     public string Prefix { get => _prefix; set { _prefix = value; OnChanged(); } }
@@ -128,6 +143,9 @@ public sealed class AppConfig
     /// <summary>输出 token 上限。0 表示不限制；设了之后无论客户端要多少都会被压到该值</summary>
     public int MaxOutputTokens { get; set; }
     public bool AutoScrollLog { get; set; } = true;
+    public string ClientType { get; set; } = "auto";
+    public bool ExperimentalDiagnostics { get; set; }
+    public double[] RouteColumnWidths { get; set; } = { 88, 104, 180, 110, 82 };
     public ObservableCollection<RouteRule> Routes { get; set; } = new();
     public ObservableCollection<ModelMapping> ModelMap { get; set; } = new();
     public ObservableCollection<PriceRule> Pricing { get; set; } = new();
@@ -147,7 +165,7 @@ public static class ConfigStore
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    public static string Dir => AppContext.BaseDirectory;
+    public static string Dir => App.IsDev ? System.IO.Path.Combine(AppContext.BaseDirectory, "dev-data") : AppContext.BaseDirectory;
     public static string Path => System.IO.Path.Combine(Dir, "config.json");
 
     public static AppConfig Load()
@@ -157,7 +175,7 @@ public static class ConfigStore
             if (File.Exists(Path))
             {
                 var json = File.ReadAllText(Path);
-                var cfg = JsonSerializer.Deserialize<AppConfig>(json, Options);
+                var cfg = Deserialize(json);
                 if (cfg is not null)
                 {
                     if (cfg.Routes.Count == 0) SeedRoutes(cfg);
@@ -185,8 +203,29 @@ public static class ConfigStore
 
     public static AppConfig? FromJson(string json)
     {
-        try { return JsonSerializer.Deserialize<AppConfig>(json, Options); }
+        try { return Deserialize(json); }
         catch { return null; }
+    }
+
+    private static AppConfig? Deserialize(string json)
+    {
+        var cfg = JsonSerializer.Deserialize<AppConfig>(json, Options);
+        if (cfg is null) return null;
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Object ||
+            !document.RootElement.TryGetProperty(nameof(AppConfig.Routes), out var routes) || routes.ValueKind != JsonValueKind.Array)
+            return cfg;
+        var index = 0;
+        foreach (var item in routes.EnumerateArray())
+        {
+            if (index >= cfg.Routes.Count) break;
+            var route = cfg.Routes[index++];
+            if (item.ValueKind == JsonValueKind.Object && !item.TryGetProperty(nameof(RouteRule.BalanceType), out _) &&
+                Uri.TryCreate(route.Upstream, UriKind.Absolute, out var uri) &&
+                string.Equals(uri.Host, "api.openai.com", StringComparison.OrdinalIgnoreCase))
+                route.BalanceType = "OpenAI";
+        }
+        return cfg;
     }
 
     /// <summary>全新的默认配置（含种子数据）。</summary>
@@ -243,7 +282,7 @@ public static class ConfigStore
 
     private static void SeedRoutes(AppConfig cfg)
     {
-        cfg.Routes.Add(new RouteRule { Prefix = "openai", Name = "OpenAI 官方", Upstream = "https://api.openai.com", Mode = "responses" });
+        cfg.Routes.Add(new RouteRule { Prefix = "openai", Name = "OpenAI 官方", Upstream = "https://api.openai.com", Mode = "responses", BalanceType = "OpenAI" });
     }
 
     private static void SeedModels(AppConfig cfg)

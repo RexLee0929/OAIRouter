@@ -60,6 +60,7 @@ public static class DebugTools
         {
             var dir = Arg(args, "--shotreal");
             UiRender.ShotReal(new ImportWindow(App.Config), Path.Combine(dir, "real-import.png"));
+            UiRender.ShotReal(new UpstreamSettingsWindow(new RouteRule(), _ => false, true), Path.Combine(dir, "real-upstream.png"));
             return 0;
         }
 
@@ -86,6 +87,7 @@ public static class DebugTools
             UiRender.ShotWindow(new PricingWindow(), Path.Combine(dir, "win-pricing.png"));
             UiRender.ShotWindow(new ModelsWindow(), Path.Combine(dir, "win-models.png"));
             UiRender.ShotWindow(new PriceSyncWindow(App.Config), Path.Combine(dir, "win-sync.png"));
+            UiRender.ShotWindow(new UpstreamSettingsWindow(new RouteRule(), _ => false, true), Path.Combine(dir, "win-upstream.png"));
             UiRender.ShotWindow(new AboutDialog(), Path.Combine(dir, "win-about.png"));
             return 0;
         }

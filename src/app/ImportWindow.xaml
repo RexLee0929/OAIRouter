@@ -9,7 +9,7 @@
     <ui:DialogShell x:Name="Shell" Style="{StaticResource DialogShell}"
                     Kind="Question" Headline="选择要导入的内容" PrimaryText="导入" SecondaryText="取消">
         <StackPanel>
-            <TextBlock x:Name="Hint" Text="未勾选的部分保持当前配置不变。导入会覆盖同名内容。"
+            <TextBlock x:Name="Hint" Text="未勾选的部分保持不变。上游密钥仅原 Windows 用户可解密；跨账户或电脑导入后需重新配置。"
                        Style="{StaticResource Hint}" Margin="0,0,0,12" TextWrapping="Wrap" />
 
             <!-- 括号里的数量由 Tag 提供，文案本身不落到 C# -->

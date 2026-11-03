@@ -8,7 +8,9 @@
 
 - 路径分流：/openai、/newapi 各自指向不同上游，互不干扰
 - 模型映射：客户端填 aa，转发时替换为真实模型名
-- 协议翻译：Chat Completions ⇄ Responses，工具与思考共存
+- 协议翻译：Chat Completions 请求转为 Responses，响应再转回 Chat Completions
+- 用量统计：筛选时间范围、查看会话分组并导出请求明细
+- 上游配置：余额查询、密钥映射和 Windows DPAPI 凭据保护
 - 运行日志：记录路由、模型、状态和耗时等；上游错误或异常可能回显敏感内容，分享前请检查
 - 托盘常驻：可隐藏到托盘，关键事件静音通知
 

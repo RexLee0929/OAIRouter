@@ -47,9 +47,13 @@
                     <ComboBox Grid.Column="1" x:Name="UpstreamBox" Style="{StaticResource CellCombo}" Width="200"
                               Margin="0,0,8,0" Visibility="Collapsed"
                               SelectionChanged="OnUpstreamChanged"
-                              ToolTip="已配置的上游，选中会自动填地址；也可以直接在右边输入任意站点" />
+                              ToolTip="选择已添加上游；NewAPI 自动填写价格地址，其他类型可填写 JSON 地址">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate><TextBlock Text="{Binding Name}" /></DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
                     <TextBox Grid.Column="2" x:Name="UrlBox" Style="{StaticResource Input}" MinWidth="160"
-                             ToolTip="可直接输入任意站点地址，例如 https://example.com/api/pricing" />
+                             ToolTip="填写完整 HTTP(S) JSON 地址。支持 NewAPI、LiteLLM，或 {&quot;models&quot;:[{&quot;model&quot;:&quot;模型名&quot;,&quot;input_per_m&quot;:1,&quot;output_per_m&quot;:2}]}（美元/百万 token）；不支持任意 JSON 路径。" />
                     <Button Grid.Column="3" Content="获取" Style="{StaticResource PrimaryButton}" Padding="16,6"
                             Margin="8,0,0,0" Click="OnFetch" />
                 </Grid>
@@ -61,13 +65,10 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="86" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="令牌" Style="{StaticResource Sub}" VerticalAlignment="Center" />
-                    <TextBox Grid.Column="1" x:Name="TokenBox" Style="{StaticResource Input}" MinWidth="140"
-                             ToolTip="站点设为「登录可见」时必填；与你在该站创建的令牌相同" />
-                    <TextBlock Grid.Column="2" Text="用户 ID" Style="{StaticResource Sub}" Margin="12,0,8,0"
-                               VerticalAlignment="Center" />
-                    <TextBox Grid.Column="3" x:Name="UserBox" Style="{StaticResource Input}"
-                             ToolTip="new-api 需要 New-Api-User 头，填数字用户 ID；不确定可留空先试" />
+                    <StackPanel Grid.Column="0" Grid.ColumnSpan="4" Orientation="Horizontal">
+                        <CheckBox x:Name="UseUpstreamCredential" Content="复用此上游余额查询令牌" VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Collapsed" />
+                        <TextBlock x:Name="AuthHint" Text="凭据与用户 ID 在上游配置中设置。" Style="{StaticResource Hint}" VerticalAlignment="Center" />
+                    </StackPanel>
                 </Grid>
             </Grid>
         </Border>

@@ -41,7 +41,7 @@ DEFAULT_DEST = r"D:/Code/OAIRouter"
 
 # 源码同步白名单（相对编辑区根）
 SOURCE_FILES = ["LICENSE", ".gitignore", "README.md", "CHANGELOG.md", "DEVELOPMENT.md"]
-SOURCE_DIRS = ["src", "tools", "releases"]
+SOURCE_DIRS = ["src", "tools", "releases", "tests"]
 
 # 判断「是不是同一批代码」时忽略的路径片段
 SKIP_PARTS = {"bin", "obj", ".git", ".vs", ".sync-state.json",

@@ -30,7 +30,11 @@ public class DialogWindow : Window
         // Loaded 在首次上屏之前，先量一次，避免看到「小窗弹出来再变大」；
         // ContentRendered 之后再校一次，收掉布局回弹留下的误差。
         Loaded += (_, _) => FitToContent();
-        ContentRendered += (_, _) => FitToContent();
+        ContentRendered += (_, _) =>
+        {
+            FitToContent();
+            WindowChrome.CenterOnOwner(this);
+        };
     }
 
     /// <summary>
@@ -52,7 +56,7 @@ public class DialogWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        WindowChrome.Apply(this);
+        WindowChrome.Apply(this, hideBorder: this is UpstreamSettingsWindow);
     }
 
     /// <summary>
@@ -77,6 +81,7 @@ public class DialogWindow : Window
     {
         FitByMeasure();
         OnFitPass();
+        WindowChrome.CenterOnOwner(this);
 
         if (++_fitPass < 3)
             Dispatcher.BeginInvoke(FitPass, System.Windows.Threading.DispatcherPriority.Background);
