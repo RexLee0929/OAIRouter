@@ -145,7 +145,10 @@ public sealed class AppConfig
     public bool AutoScrollLog { get; set; } = true;
     public string ClientType { get; set; } = "auto";
     public bool ExperimentalDiagnostics { get; set; }
+    public string WorkBuddyLogPath { get; set; } = "";
     public double[] RouteColumnWidths { get; set; } = { 88, 104, 180, 110, 82 };
+    public double[] MapColumnWidths { get; set; } = { 150, 150, 106 };
+    public double[] UsageColumnWidths { get; set; } = { 220, 130, 150, 55, 75, 75, 80 };
     public ObservableCollection<RouteRule> Routes { get; set; } = new();
     public ObservableCollection<ModelMapping> ModelMap { get; set; } = new();
     public ObservableCollection<PriceRule> Pricing { get; set; } = new();

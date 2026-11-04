@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../src/app/UsageStats.cs" Link="UsageStats.cs" />
+    <Compile Include="../src/app/LegacyUsageEvidence.cs" Link="LegacyUsageEvidence.cs" />
     <Compile Include="PricingRegression.cs" />
   </ItemGroup>
 </Project>

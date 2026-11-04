@@ -68,6 +68,16 @@ public partial class MainWindow : Window
             RouteHeader.ColumnDefinitions[i].Width = new GridLength(double.IsFinite(width) ? Math.Clamp(width, 50, 2000) : defaults[i]);
         }
 
+        var mapDefaults = new[] { 150d, 150d, 106d };
+        for (var i = 0; i < mapDefaults.Length; i++)
+        {
+            var width = _cfg.MapColumnWidths is { Length: 3 } ? _cfg.MapColumnWidths[i] : mapDefaults[i];
+            MapHeader.ColumnDefinitions[i].Width = new GridLength(double.IsFinite(width) ? Math.Clamp(width, 50, 2000) : mapDefaults[i]);
+        }
+
+        if (_cfg.UsageColumnWidths is { Length: 7 })
+            _usageColumnWidths = _cfg.UsageColumnWidths.Select((w, i) => double.IsFinite(w) ? Math.Clamp(w, 40, 2000) : _usageColumnWidths[i]).ToArray();
+
         RouteItems.ItemsSource = _cfg.Routes;
         MapItems.ItemsSource = _cfg.ModelMap;
         LogList.ItemsSource = LogStore.Instance.Items;
@@ -82,12 +92,15 @@ public partial class MainWindow : Window
         ClientBox.ItemsSource = new[] { "Auto", "WorkBuddy", "DeepSeek Harness" };
         ClientBox.SelectedIndex = _cfg.ClientType?.Trim().ToLowerInvariant() switch { "workbuddy" => 1, "deepseek" or "harness" or "deepseek-harness" => 2, _ => 0 };
         DiagnosticsBox.IsChecked = _cfg.ExperimentalDiagnostics;
-        DiagnosticsHint.Text = $"诊断默认关闭，不记录正文或密钥。独立诊断日志：{LogStore.Instance.DiagnosticsFile}";
+        DiagnosticsHint.Text = $"实验诊断默认关闭；仅分析代理入站请求，不读取 WorkBuddy 日志。记录白名单结构及进程内关联摘要，请排查后关闭并谨慎分享日志：{LogStore.Instance.DiagnosticsFile}";
 
-        BucketBox.ItemsSource = new[] { "按日", "12 小时", "6 小时", "1 小时", "30 分钟", "15 分钟" };
-        BucketBox.SelectedIndex = 0;
-        UsageRangeBox.ItemsSource = new[] { "全部时间", "过去 1 小时", "过去 6 小时", "过去 12 小时", "过去 24 小时", "过去 7 天", "过去 30 天" };
-        UsageRangeBox.SelectedIndex = 0;
+        BucketBox.ItemsSource = new[] { "15 分钟", "30 分钟", "01 小时", "06 小时", "12 小时", "24 小时" };
+        BucketBox.SelectedIndex = 5;
+        UsageRangeBox.ItemsSource = new[] { "过去 1 小时", "过去 6 小时", "过去 12 小时", "过去 24 小时", "过去 3 天", "过去 7 天" };
+        UsageRangeBox.SelectedIndex = 5;
+        UsageNameBox.ItemsSource = new[] { "模型别名", "实际名称" };
+        UsageNameBox.SelectedIndex = 0;
+        UpdateUsageModels();
 
         _cfg.Routes.CollectionChanged += OnCollectionChanged;
         _cfg.ModelMap.CollectionChanged += OnCollectionChanged;
@@ -533,7 +546,7 @@ public partial class MainWindow : Window
     private void OnSortMaps(object sender, RoutedEventArgs e)
     {
         SortMaps(_mapAsc);
-        MapSortBtn.Content = _mapAsc ? "名称 ↑" : "名称 ↓";
+        MapSortBtn.Content = _mapAsc ? "别名 ↑" : "别名 ↓";
         _mapAsc = !_mapAsc;
     }
 
@@ -567,6 +580,18 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement { DataContext: ModelMapping map }) map.IsEditing = !map.IsEditing;
     }
 
+    private void OnMapKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || sender is not FrameworkElement { DataContext: ModelMapping { IsEditing: true } map }) return;
+        if (e.OriginalSource is DependencyObject source)
+        {
+            for (var current = source; current != null && current != sender; current = VisualTreeHelper.GetParent(current))
+                if (current is ComboBox { IsDropDownOpen: true }) return;
+        }
+        map.IsEditing = false;
+        e.Handled = true;
+    }
+
     private void OnRemoveRouteRow(object sender, RoutedEventArgs e)
     {
         if (sender is Button { DataContext: RouteRule rule } button && InlineConfirm.Arm(button, "确认", () => _cfg.Routes.Remove(rule)))
@@ -584,12 +609,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        _cfg.ModelMap.Add(new ModelMapping
+        _cfg.ModelMap.Insert(0, new ModelMapping
         {
             Alias = "alias" + (_cfg.ModelMap.Count + 1),
             Target = "gpt-6-luna",
             IsEditing = true,
         });
+        MapScroll.ScrollToTop();
     }
 
     private void OnRemoveMapRow(object sender, RoutedEventArgs e)
@@ -737,6 +763,7 @@ public partial class MainWindow : Window
         _cfg.AutoScrollLog = true;
         _cfg.ClientType = fresh.ClientType;
         _cfg.ExperimentalDiagnostics = fresh.ExperimentalDiagnostics;
+        _cfg.WorkBuddyLogPath = "";
         ClientBox.SelectedIndex = 0;
         DiagnosticsBox.IsChecked = false;
 
@@ -781,6 +808,19 @@ public partial class MainWindow : Window
         if (!ConfigStore.Save(_cfg)) ShowStatusFlash("列宽保存失败");
     }
 
+    private void OnMapColumnDrag(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        var column = MapHeader.ColumnDefinitions[Grid.GetColumn((UIElement)sender)];
+        column.Width = new GridLength(Math.Clamp(column.Width.Value + e.HorizontalChange, 50, 2000));
+    }
+
+    private void OnMapColumnResize(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        _cfg.MapColumnWidths = MapHeader.ColumnDefinitions.Take(3).Select(c => c.Width.Value).ToArray();
+        _saveTimer.Stop();
+        if (!ConfigStore.Save(_cfg)) ShowStatusFlash("列宽保存失败");
+    }
+
     /// <summary>滚动条出现时给表头补同样的右边距，避免列错位。</summary>
     private void OnTableScroll(object sender, ScrollChangedEventArgs e)
     {
@@ -788,11 +828,10 @@ public partial class MainWindow : Window
         RouteHeaderScroll.Margin = new Thickness(0, 0, routePad, 0);
         RouteHeaderScroll.ScrollToHorizontalOffset(RouteScroll.HorizontalOffset);
 
-        var mapPad = MapScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? 17 : 0;
-        MapHeader.Margin = new Thickness(0, 0, mapPad, 2);
+        var mapPad = MapScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? SystemParameters.VerticalScrollBarWidth : 0;
+        MapHeaderScroll.Margin = new Thickness(0, 0, mapPad, 0);
+        MapHeaderScroll.ScrollToHorizontalOffset(MapScroll.HorizontalOffset);
     }
-
-    /* ----------------------------- 日志 ----------------------------- */
 
     /* ----------------------------- 用量与计价 ----------------------------- */
 
@@ -843,11 +882,11 @@ public partial class MainWindow : Window
     {
         _bucket = BucketBox.SelectedIndex switch
         {
-            1 => TimeSpan.FromHours(12),
-            2 => TimeSpan.FromHours(6),
-            3 => TimeSpan.FromHours(1),
-            4 => TimeSpan.FromMinutes(30),
-            5 => TimeSpan.FromMinutes(15),
+            0 => TimeSpan.FromMinutes(15),
+            1 => TimeSpan.FromMinutes(30),
+            2 => TimeSpan.FromHours(1),
+            3 => TimeSpan.FromHours(6),
+            4 => TimeSpan.FromHours(12),
             _ => TimeSpan.FromDays(1),
         };
         RefreshUsage();
@@ -862,24 +901,64 @@ public partial class MainWindow : Window
         MarkGroupButton(GroupSession, group == UsageGroup.Session);
         MarkGroupButton(GroupTime, group == UsageGroup.Time);
         BucketBox.Visibility = group == UsageGroup.Time ? Visibility.Visible : Visibility.Collapsed;
-        UsageRangeBox.Visibility = group == UsageGroup.Time ? Visibility.Collapsed : Visibility.Visible;
+        UsageRangeBox.Visibility = _group == UsageGroup.Time ? Visibility.Collapsed : Visibility.Visible;
         RefreshUsage();
         UsageScroll.ScrollToTop();
     }
 
-    private DateTime? UsageSince() => _group == UsageGroup.Time ? null : UsageRangeBox.SelectedIndex switch
+    private DateTime? UsageSince() => _group == UsageGroup.Time ? DateTime.Now.AddDays(-7) : UsageRangeBox.SelectedIndex switch
     {
-        1 => DateTime.Now.AddHours(-1),
-        2 => DateTime.Now.AddHours(-6),
-        3 => DateTime.Now.AddHours(-12),
-        4 => DateTime.Now.AddHours(-24),
-        5 => DateTime.Now.AddDays(-7),
-        6 => DateTime.Now.AddDays(-30),
-        _ => null,
+        0 => DateTime.Now.AddHours(-1),
+        1 => DateTime.Now.AddHours(-6),
+        2 => DateTime.Now.AddHours(-12),
+        3 => DateTime.Now.AddHours(-24),
+        4 => DateTime.Now.AddDays(-3),
+        _ => DateTime.Now.AddDays(-7),
     };
+
+    private bool UsageRealName => UsageNameBox.SelectedIndex == 1;
+    private string? UsageModel => UsageModelBox.SelectedIndex > 0 ? UsageModelBox.SelectedItem as string : null;
+    private bool _updatingUsageModels;
+    private double[] _usageColumnWidths = { 220, 130, 150, 55, 75, 75, 80 };
+    private void UpdateUsageModels()
+    {
+        if (UsageModelBox is null || UsageRangeBox is null || UsageNameBox is null) return;
+        var selected = UsageModel;
+        _updatingUsageModels = true;
+        UsageModelBox.ItemsSource = new[] { "全部模型" }.Concat(UsageStats.FilterModels(UsageSince(), UsageRealName)).ToList();
+        UsageModelBox.SelectedItem = selected ?? "全部模型";
+        if (UsageModelBox.SelectedIndex < 0) UsageModelBox.SelectedIndex = 0;
+        _updatingUsageModels = false;
+    }
+    private void OnUsageModelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready || _updatingUsageModels) return;
+        RefreshUsage();
+    }
+    private void OnUsageNameChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready) return;
+        UsageModelBox.SelectedIndex = 0;
+        UpdateUsageModels();
+        RefreshUsage();
+    }
+    private void OnUsageColumnDrag(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        var index = Grid.GetColumn((UIElement)sender);
+        var column = UsageHeader.ColumnDefinitions[index];
+        if (column.Width.Value == 0) return;
+        var width = Math.Clamp(column.ActualWidth + e.HorizontalChange, 40, 2000);
+        column.Width = new GridLength(width);
+        _usageColumnWidths[index] = width;
+        _cfg.UsageColumnWidths = (double[])_usageColumnWidths.Clone();
+        QueueSave();
+    }
+    private void OnUsageScrollChanged(object sender, ScrollChangedEventArgs e) => UsageHeaderScroll.ScrollToHorizontalOffset(e.HorizontalOffset);
 
     private void OnUsageRangeChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_ready) return;
+        UpdateUsageModels();
         RefreshUsage();
         UsageScroll.ScrollToTop();
     }
@@ -894,7 +973,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            File.WriteAllText(dialog.FileName, UsageStats.ExportCsv(_cfg, UsageSince()), new System.Text.UTF8Encoding(true));
+            File.WriteAllText(dialog.FileName, UsageStats.ExportCsv(_cfg, UsageSince(), UsageModel, UsageRealName), new System.Text.UTF8Encoding(true));
             ShowStatusFlash("请求统计已导出");
         }
         catch (Exception ex)
@@ -925,28 +1004,34 @@ public partial class MainWindow : Window
     {
         var offset = UsageScroll.VerticalOffset;
         List<UsageRow> rows;
-        var isSession = _group == UsageGroup.Session;
-        UsageItems.Visibility = isSession ? Visibility.Collapsed : Visibility.Visible;
-        SessionUsageItems.Visibility = isSession ? Visibility.Visible : Visibility.Collapsed;
-        if (isSession)
+        if (!_ready) return;
+        UpdateUsageModels();
+        var groups = _group == UsageGroup.Session
+            ? UsageStats.GroupSessions(_cfg, UsageSince(), UsageModel, UsageRealName)
+            : UsageStats.GroupBreakdown(_group, _cfg, _bucket, UsageSince(), UsageModel, UsageRealName);
+        UsageTitleHeader.Text = _group switch { UsageGroup.Time => "时间", UsageGroup.Route => "上游名称", UsageGroup.Model => "模型别名", _ => "会话" };
+        UsageUpstreamHeader.Text = _group == UsageGroup.Time ? "上游名称" : _group == UsageGroup.Route ? "上游类型" : "";
+        for (var i = 0; i < _usageColumnWidths.Length; i++)
         {
-            var groups = UsageStats.GroupSessions(_cfg, UsageSince());
-            rows = groups.Select(g => g.Total).ToList();
-            var displayRows = new List<SessionDisplayRow>();
-            foreach (var group in groups)
-            {
-                var expanded = _expandedSessions.Contains(group.Id);
-                displayRows.Add(new SessionDisplayRow { SessionId = group.Id, Row = group.Total, IsParent = true, IsExpanded = expanded });
-                if (expanded)
-                    displayRows.AddRange(group.Dialogs.Select(dialog => new SessionDisplayRow { SessionId = group.Id, Row = dialog }));
-            }
-            SessionUsageItems.ItemsSource = displayRows;
+            var column = UsageHeader.ColumnDefinitions[i];
+            var hidden = i == 1 && (_group == UsageGroup.Session || _group == UsageGroup.Model);
+            column.MinWidth = hidden ? 0 : i < 3 ? 60 : 40;
+            column.Width = new GridLength(hidden ? 0 : _usageColumnWidths[i]);
         }
-        else
+        UsageModelHeader.Text = _group == UsageGroup.Model ? "实际名称" : "模型";
+        rows = groups.Select(g => g.Total).ToList();
+        UsageItems.Visibility = Visibility.Collapsed;
+        SessionUsageItems.Visibility = Visibility.Visible;
+        var displayRows = new List<SessionDisplayRow>();
+        foreach (var group in groups)
         {
-            rows = UsageStats.Group(_group, _cfg, _bucket, UsageSince());
-            UsageItems.ItemsSource = rows;
+            var id = $"{_group}:{group.Id}";
+            var expanded = _expandedSessions.Contains(id);
+            displayRows.Add(new SessionDisplayRow { SessionId = id, Row = group.Total, IsParent = group.Dialogs.Count > 0, IsExpanded = expanded });
+            if (expanded)
+                displayRows.AddRange(group.Dialogs.Select(dialog => new SessionDisplayRow { SessionId = id, Row = dialog }));
         }
+        SessionUsageItems.ItemsSource = displayRows;
         if (UsagePanel.IsVisible && offset > 0)
         {
             UsageScroll.UpdateLayout();

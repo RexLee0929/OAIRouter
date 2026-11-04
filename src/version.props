@@ -3,7 +3,7 @@
   <!-- 版本与作者信息的唯一来源：主程序和安装器都导入本文件，
        改版本只改这里一处。安装器运行时从自身程序集读取版本号。 -->
   <PropertyGroup>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Company>Rex Lee</Company>
     <Authors>Rex Lee</Authors>
     <Product>OAIRouter</Product>

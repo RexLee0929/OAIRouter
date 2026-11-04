@@ -6,13 +6,12 @@ namespace OAIRouter;
 public static class LegacyUsageEvidence
 {
     private const long MaxFileBytes = 8 * 1024 * 1024;
-
-    private readonly record struct MatchKey(string Session, long Second, int Status, long Duration, long Input, long Output);
-    private sealed record Evidence(MatchKey Key, string Trace, string Request);
+    private readonly record struct MatchKey(string Session, int Status, long Duration, long Input, long Output);
+    private sealed record Evidence(MatchKey Key, long Second, string Trace, string Request, bool TokensUnknown, bool RequestPresent);
 
     public static List<UsageRecord> Enrich(IReadOnlyList<UsageRecord> records, string diagnosticFile)
     {
-        var result = records.Select(r => Copy(r, r.Client, r.TraceId, r.DialogId, r.DialogIdMissing)).ToList();
+        var result = records.Select(r => Copy(r, null)).ToList();
         var diagnostics = new List<Evidence>();
         try
         {
@@ -35,20 +34,29 @@ public static class LegacyUsageEvidence
             return result;
         }
 
-        var evidenceByKey = diagnostics.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.ToList());
-        var recordKeys = records.Select(KeyFor).ToList();
-        var recordCounts = recordKeys.Where(k => k.HasValue).GroupBy(k => k!.Value)
-            .ToDictionary(g => g.Key, g => g.Count());
+        var byKey = diagnostics.Select((e, index) => (e, index)).GroupBy(x => x.e.Key)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        var matches = new List<int>[records.Count];
+        var reverseCounts = new int[diagnostics.Count];
+        for (var i = 0; i < records.Count; i++)
+        {
+            matches[i] = new List<int>();
+            var key = KeyFor(records[i]);
+            if (key is null || !byKey.TryGetValue(key.Value, out var candidates)) continue;
+            var second = records[i].Time.Ticks / TimeSpan.TicksPerSecond;
+            foreach (var candidate in candidates)
+            {
+                if (second - candidate.e.Second is < 0 or > 1) continue;
+                matches[i].Add(candidate.index);
+                reverseCounts[candidate.index]++;
+            }
+        }
         for (var i = 0; i < records.Count; i++)
         {
             var r = records[i];
-            var key = recordKeys[i];
-            if (!string.IsNullOrEmpty(r.Client) || !string.IsNullOrEmpty(r.TraceId) || !string.IsNullOrEmpty(r.DialogId)
-                || r.DialogIdMissing || key is null || recordCounts[key.Value] != 1
-                || !evidenceByKey.TryGetValue(key.Value, out var matches) || matches.Count != 1) continue;
-            var match = matches[0];
-            result[i] = Copy(r, "workbuddy", "legacy-diagnostic:" + match.Trace,
-                match.Request.Length == 0 ? "" : "legacy-diagnostic:" + match.Request, match.Request.Length == 0, true);
+            if (matches[i].Count != 1 || reverseCounts[matches[i][0]] != 1 ||
+                (!string.IsNullOrWhiteSpace(r.Client) && r.Client != "workbuddy")) continue;
+            result[i] = Copy(r, diagnostics[matches[i][0]]);
         }
         return result;
     }
@@ -56,8 +64,7 @@ public static class LegacyUsageEvidence
     private static MatchKey? KeyFor(UsageRecord r)
     {
         if (r.SessionId.Length != 64 || !r.SessionId.All(Uri.IsHexDigit)) return null;
-        return new MatchKey(r.SessionId[..20].ToLowerInvariant(), r.Time.Ticks / TimeSpan.TicksPerSecond,
-            r.Status, r.Ms, r.Prompt, r.Completion);
+        return new MatchKey(r.SessionId[..20].ToLowerInvariant(), r.Status, r.Ms, r.Prompt, r.Completion);
     }
 
     private static Evidence? Parse(string line)
@@ -69,8 +76,7 @@ public static class LegacyUsageEvidence
         {
             var equals = part.IndexOf('=');
             if (equals <= 0) continue;
-            var name = part[..equals];
-            if (!fields.TryAdd(name, part[(equals + 1)..])) return null;
+            if (!fields.TryAdd(part[..equals], part[(equals + 1)..])) return null;
         }
         if (!fields.TryGetValue("id_digest", out var digest) || digest != "hmac_sha256_64_process"
             || !fields.TryGetValue("phase", out var phase) || phase != "completed"
@@ -81,17 +87,21 @@ public static class LegacyUsageEvidence
             || !fields.TryGetValue("session_stat_sha256_20", out var session) || !Hex(session, 20)
             || !fields.TryGetValue("header_trace", out var trace) || !Hex(trace, 16)
             || !Number(fields, "status", out var status) || status > int.MaxValue
-            || !Number(fields, "duration_ms", out var duration)
-            || !Number(fields, "input_tokens", out var input)
-            || !Number(fields, "output_tokens", out var output)) return null;
+            || !Number(fields, "duration_ms", out var duration)) return null;
+        var unknown = fields.TryGetValue("input_tokens", out var inputText) && inputText == "unknown"
+            && fields.TryGetValue("output_tokens", out var outputText) && outputText == "unknown"
+            && fields.TryGetValue("usage_present", out var present) && present == "False";
+        long input = 0, output = 0;
+        if (!unknown && (!Number(fields, "input_tokens", out input) || !Number(fields, "output_tokens", out output))) return null;
         var request = "";
         if (fields.TryGetValue("header_request", out var value))
         {
             if (!Hex(value, 16)) return null;
             request = value.ToLowerInvariant();
         }
-        return new Evidence(new MatchKey(session.ToLowerInvariant(), time.Ticks / TimeSpan.TicksPerSecond,
-            (int)status, duration, input, output), trace.ToLowerInvariant(), request);
+        return new Evidence(new MatchKey(session.ToLowerInvariant(), (int)status, duration, input, output),
+            time.Ticks / TimeSpan.TicksPerSecond, trace.ToLowerInvariant(), request, unknown,
+            fields.TryGetValue("request_id_present", out var requestPresent) && requestPresent == "True");
     }
 
     private static bool Hex(string value, int length) => value.Length == length && value.All(Uri.IsHexDigit);
@@ -101,11 +111,20 @@ public static class LegacyUsageEvidence
         return fields.TryGetValue(key, out var text) && long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value >= 0;
     }
 
-    private static UsageRecord Copy(UsageRecord r, string client, string trace, string dialog, bool missing, bool? legacyDiagnostic = null) => new()
+    private static UsageRecord Copy(UsageRecord r, Evidence? evidence) => new()
     {
-        Time = r.Time, StartedAt = r.StartedAt, SessionId = r.SessionId, Client = client,
-        TraceId = trace, DialogId = dialog, DialogIdMissing = missing, LegacyDiagnostic = legacyDiagnostic ?? r.LegacyDiagnostic, Route = r.Route,
-        Model = r.Model, Target = r.Target, Prompt = r.Prompt, Completion = r.Completion,
+        Time = r.Time, StartedAt = r.StartedAt, SessionId = r.SessionId, Client = r.Client,
+        TraceId = r.TraceId, DialogId = r.DialogId, DialogIdMissing = r.DialogIdMissing,
+        CorrelationSessionId = r.CorrelationSessionId, ParentSessionId = r.ParentSessionId,
+        RequestId = r.RequestId, RootRequestId = r.RootRequestId, CorrelationInvalid = r.CorrelationInvalid,
+        LegacyDiagnostic = r.LegacyDiagnostic || evidence is not null,
+        DiagnosticTraceId = evidence?.Trace ?? r.DiagnosticTraceId,
+        DiagnosticDialogId = evidence?.Request ?? r.DiagnosticDialogId,
+        DiagnosticTokensUnknown = evidence?.TokensUnknown ?? r.DiagnosticTokensUnknown,
+        DiagnosticAssociationCandidate = evidence is null ? r.DiagnosticAssociationCandidate :
+            evidence.Request.Length == 0 && evidence.RequestPresent &&
+            string.IsNullOrWhiteSpace(r.TraceId) && string.IsNullOrWhiteSpace(r.DialogId) && !r.DialogIdMissing,
+        Route = r.Route, Model = r.Model, Target = r.Target, Prompt = r.Prompt, Completion = r.Completion,
         CacheRead = r.CacheRead, CacheWrite = r.CacheWrite, Ms = r.Ms, Status = r.Status
     };
 }

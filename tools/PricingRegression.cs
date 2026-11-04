@@ -85,7 +85,17 @@ finally
 
 namespace OAIRouter
 {
-    public sealed class AppConfig { public List<PriceRule> Pricing { get; } = new(); }
+    public sealed class AppConfig
+    {
+        public List<PriceRule> Pricing { get; } = new();
+        public List<RouteConfig> Routes { get; } = new();
+    }
+    public sealed class RouteConfig
+    {
+        public string Prefix { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string BalanceType { get; set; } = "";
+    }
     public sealed class PriceRule
     {
         public string Route { get; set; } = "*";
@@ -104,6 +114,7 @@ namespace OAIRouter
     public sealed class LogStore
     {
         public static LogStore Instance { get; } = new();
+        public string DiagnosticsFile => Path.Combine(ConfigStore.Dir, "diagnostics.log");
         public void Warn(string category, string message) => throw new Exception($"{category}: {message}");
     }
 }

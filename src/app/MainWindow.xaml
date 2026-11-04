@@ -175,55 +175,69 @@
 
                             <StackPanel Grid.Row="0" Margin="0,0,0,2">
                                 <TextBlock x:Name="UsageSummary" Style="{StaticResource Hint}" TextWrapping="Wrap" />
-                                <WrapPanel HorizontalAlignment="Right">
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Content="导出" Style="{StaticResource GhostButton}" Padding="8,1" FontSize="11"
+                                            Margin="3,0,0,0" Click="OnExportUsage" ToolTip="导出请求明细 CSV" />
+                                <WrapPanel HorizontalAlignment="Left">
                                     <Button x:Name="GroupModel" Content="模型" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Click="OnGroupByModel" />
-                                    <Button x:Name="GroupRoute" Content="路由" Style="{StaticResource GhostButton}"
+                                    <Button x:Name="GroupRoute" Content="上游" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupByRoute" />
                                     <Button x:Name="GroupSession" Content="会话" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupBySession"
                                             ToolTip="按会话分组，点击展开查看对话；时间为 OAIRouter 首次观测到的请求发起时间" />
                                     <Button x:Name="GroupTime" Content="时间" Style="{StaticResource GhostButton}"
                                             Padding="8,1" FontSize="11" Margin="3,0,0,0" Click="OnGroupByTime" />
-                                    <Grid Width="100" Height="22" Margin="4,0,0,0">
-                                        <ComboBox x:Name="BucketBox" Style="{StaticResource CellCombo}"
-                                                  SelectionChanged="OnBucketChanged" />
-                                        <ComboBox x:Name="UsageRangeBox" Style="{StaticResource CellCombo}" Visibility="Collapsed"
-                                                  SelectionChanged="OnUsageRangeChanged" />
-                                    </Grid>
-                                    <Button Content="导出" Style="{StaticResource GhostButton}" Padding="8,1" FontSize="11"
-                                            Margin="3,0,0,0" Click="OnExportUsage" ToolTip="导出请求明细 CSV" />
+                                    <ComboBox x:Name="UsageRangeBox" Width="95" Height="22" Margin="4,0,0,0" Style="{StaticResource CellCombo}" SelectionChanged="OnUsageRangeChanged" />
+                                    <ComboBox x:Name="BucketBox" Width="95" Height="22" Margin="4,0,0,0" Style="{StaticResource CellCombo}" SelectionChanged="OnBucketChanged" />
+                                    <ComboBox x:Name="UsageModelBox" Width="120" Height="22" Margin="4,0,0,0" Style="{StaticResource CellCombo}" SelectionChanged="OnUsageModelChanged" />
+                                    <ComboBox x:Name="UsageNameBox" Width="85" Height="22" Margin="4,0,0,0" Style="{StaticResource CellCombo}" SelectionChanged="OnUsageNameChanged" />
                                 </WrapPanel>
+                                </DockPanel>
                             </StackPanel>
 
-                            <Grid Grid.Row="1" Height="22" HorizontalAlignment="Left"
-                                  Width="{Binding ViewportWidth, ElementName=UsageScroll}">
+                            <ScrollViewer x:Name="UsageHeaderScroll" Grid.Row="1" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                            <Grid x:Name="UsageHeader" Height="22" HorizontalAlignment="Left">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" MinWidth="60" />
-                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UReq" MinWidth="44" />
-                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UPrompt" MinWidth="58" />
-                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UComp" MinWidth="58" />
-                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UCost" MinWidth="68" />
+                                    <ColumnDefinition Width="220" MinWidth="60" />
+                                    <ColumnDefinition Width="130" MinWidth="60" />
+                                    <ColumnDefinition Width="150" MinWidth="60" />
+                                    <ColumnDefinition Width="55" MinWidth="40" />
+                                    <ColumnDefinition Width="75" MinWidth="40" />
+                                    <ColumnDefinition Width="75" MinWidth="40" />
+                                    <ColumnDefinition Width="80" MinWidth="40" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="名称" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="请求" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="2" Text="输入" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="3" Text="输出" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="4" Text="金额" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock x:Name="UsageTitleHeader" Grid.Column="0" Text="时间" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock x:Name="UsageUpstreamHeader" Grid.Column="1" Text="上游名称" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock x:Name="UsageModelHeader" Grid.Column="2" Text="模型" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="3" Text="请求" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="4" Text="输入" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="5" Text="输出" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="6" Text="金额" Style="{StaticResource Hint}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                <Thumb Grid.Column="0" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="1" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="2" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="3" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="4" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="5" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
+                                <Thumb Grid.Column="6" Style="{StaticResource RouteColumnThumb}" DragDelta="OnUsageColumnDrag" />
                             </Grid>
+                            </ScrollViewer>
 
-                            <ScrollViewer x:Name="UsageScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ScrollViewer x:Name="UsageScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" ScrollChanged="OnUsageScrollChanged">
                                 <Grid>
                                 <ItemsControl x:Name="UsageItems">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Grid Height="24">
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" MinWidth="60" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UReq" MinWidth="44" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UPrompt" MinWidth="58" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UComp" MinWidth="58" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UCost" MinWidth="68" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[0].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[1].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[2].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[3].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[4].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[5].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[6].Width, ElementName=UsageHeader}" />
                                                 </Grid.ColumnDefinitions>
                                                 <TextBlock Grid.Column="0" Text="{Binding Key}" ToolTip="{Binding Key}" Style="{StaticResource CellText}" Margin="6,0,0,0" />
                                                 <TextBlock Grid.Column="1" Text="{Binding RequestsText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
@@ -239,11 +253,13 @@
                                         <DataTemplate>
                                             <Grid Height="24">
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" MinWidth="60" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UReq" MinWidth="44" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UPrompt" MinWidth="58" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UComp" MinWidth="58" />
-                                                    <ColumnDefinition Width="Auto" SharedSizeGroup="UCost" MinWidth="68" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[0].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[1].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[2].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[3].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[4].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[5].Width, ElementName=UsageHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[6].Width, ElementName=UsageHeader}" />
                                                 </Grid.ColumnDefinitions>
                                                 <Button Grid.Column="0" Click="OnToggleSession" Visibility="{Binding IsParent, Converter={StaticResource BoolToVis}}"
                                                         Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch"
@@ -252,10 +268,12 @@
                                                 </Button>
                                                 <TextBlock Grid.Column="0" Text="{Binding Row.Key}" ToolTip="{Binding Row.Key}" Style="{StaticResource CellText}"
                                                            Margin="24,0,0,0" Visibility="{Binding IsParent, Converter={StaticResource InverseBoolToVis}}" />
-                                                <TextBlock Grid.Column="1" Text="{Binding Row.RequestsText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
-                                                <TextBlock Grid.Column="2" Text="{Binding Row.PromptText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
-                                                <TextBlock Grid.Column="3" Text="{Binding Row.CompletionText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
-                                                <TextBlock Grid.Column="4" Text="{Binding Row.CostText}" Style="{StaticResource CellText}" Margin="6,0,4,0" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Row.Upstream}" ToolTip="{Binding Row.Upstream}" Style="{StaticResource CellText}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Column="2" Text="{Binding Row.ModelName}" ToolTip="{Binding Row.ModelName}" Style="{StaticResource CellText}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Column="3" Text="{Binding Row.RequestsText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="4" Text="{Binding Row.PromptText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="5" Text="{Binding Row.CompletionText}" Style="{StaticResource CellText}" Margin="6,0,10,0" />
+                                                <TextBlock Grid.Column="6" Text="{Binding Row.CostText}" Style="{StaticResource CellText}" Margin="6,0,4,0" />
                                             </Grid>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
@@ -431,38 +449,43 @@
                         <Grid Grid.Row="0" Margin="0,0,0,6">
                             <TextBlock Text="模型映射" Style="{StaticResource H1}" VerticalAlignment="Center" />
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                <Button x:Name="MapSortBtn" Content="名称 ↑" Style="{StaticResource GhostButton}"
+                                <Button x:Name="MapSortBtn" Content="别名 ↑" Style="{StaticResource GhostButton}"
                                         Padding="8,3" FontSize="11" Click="OnSortMaps" />
                                 <Button Content="添加" Style="{StaticResource GhostButton}" Padding="10,4"
                                         Margin="6,0,0,0" Click="OnAddMap" />
                             </StackPanel>
                         </Grid>
 
-                        <Grid x:Name="MapHeader" Grid.Row="1" Height="26" Margin="0,0,0,2">
+                        <ScrollViewer x:Name="MapHeaderScroll" Grid.Row="1" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                        <Grid x:Name="MapHeader" Height="26" Margin="0,0,0,2" HorizontalAlignment="Left">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="150" />
+                                <ColumnDefinition Width="150" />
                                 <ColumnDefinition Width="106" />
                                 <ColumnDefinition Width="30" />
                                 <ColumnDefinition Width="30" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="客户端填的模型名" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
-                            <TextBlock Grid.Column="1" Text="实际转发为" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="0" Text="别名" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="实际名称" Style="{StaticResource Hint}" Margin="8,0,0,0" VerticalAlignment="Center" />
                             <TextBlock Grid.Column="2" Text="模式" Style="{StaticResource Hint}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                        ToolTip="留空跟随路由；可单独指定 responses / chat / rewrite" />
+                            <Thumb Grid.Column="0" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnMapColumnDrag" DragCompleted="OnMapColumnResize" />
+                            <Thumb Grid.Column="1" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnMapColumnDrag" DragCompleted="OnMapColumnResize" />
+                            <Thumb Grid.Column="2" Style="{StaticResource RouteColumnThumb}" ToolTip="拖动调整列宽" DragDelta="OnMapColumnDrag" DragCompleted="OnMapColumnResize" />
                         </Grid>
+                        </ScrollViewer>
 
                         <ScrollViewer x:Name="MapScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled" ScrollChanged="OnTableScroll">
+                                      HorizontalScrollBarVisibility="Auto" ScrollChanged="OnTableScroll">
                             <Grid>
                                 <ItemsControl x:Name="MapItems">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <Grid Height="34">
+                                            <Grid Height="34" PreviewKeyDown="OnMapKeyDown">
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="106" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[0].Width, ElementName=MapHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[1].Width, ElementName=MapHeader}" />
+                                                    <ColumnDefinition Width="{Binding ColumnDefinitions[2].Width, ElementName=MapHeader}" />
                                                     <ColumnDefinition Width="30" />
                                                     <ColumnDefinition Width="30" />
                                                 </Grid.ColumnDefinitions>

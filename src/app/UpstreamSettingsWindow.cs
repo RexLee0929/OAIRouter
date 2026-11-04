@@ -52,7 +52,7 @@ public sealed class UpstreamSettingsWindow : DialogWindow
         Add("Access Token（余额查询）", _balance);
         Add("API Key（实际上游密钥，留空透传）", _upstream);
         Add("自定义 API Key（客户端本地密钥，可留空）", _local);
-        Add("NewAPI 用户 ID（可选）", _user);
+        Add("用户 ID（可选）", _user);
         Add("余额查询地址（NewAPI 留空使用上游地址）", _url);
         Add("自定义余额 JSON 路径", _path);
         var actions = new Grid { Margin = new Thickness(0, 6, 0, 0) };

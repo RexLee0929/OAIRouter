@@ -157,6 +157,7 @@ public sealed class ProxyService
             return;
         }
 
+        var diagnosticsEnabled = cfg.ExperimentalDiagnostics;
         var isChat = rest.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)
                      && HttpMethods.IsPost(ctx.Request.Method);
 
@@ -172,6 +173,7 @@ public sealed class ProxyService
         var traceId = "";
         var dialogId = "";
         var dialogIdMissing = false;
+        (string session, string parent, string request, string root, bool invalid) correlation = ("", "", "", "", false);
         var diagnosticDetails = "";
         var diagnosticMode = "unknown";
         var diagnosticBodyBytes = -1;
@@ -191,13 +193,30 @@ public sealed class ProxyService
             var isJson = isChat || contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)
                 || contentType.Split(';')[0].Trim().EndsWith("+json", StringComparison.OrdinalIgnoreCase);
             var payload = isJson ? await ReadBodyAsync(ctx) : null;
-            (client, conversationId, sessionSource, hasTraceId, hasRequestId) = IdentifyClient(ctx, payload, cfg.ClientType);
-            if (client == "workbuddy")
-                (traceId, dialogId, dialogIdMissing) = IdentifyWorkBuddyTurn(ctx, payload);
-            if (cfg.ExperimentalDiagnostics) diagnosticDetails = DescribeIdentity(ctx, payload);
+            try { (client, conversationId, sessionSource, hasTraceId, hasRequestId) = IdentifyClient(ctx, payload, cfg.ClientType); }
+            catch (Exception) { }
+            if (client == "workbuddy" || client == "unknown")
+            {
+                try { correlation = IdentifyWorkBuddyCorrelation(ctx, payload, conversationId); }
+                catch (Exception) { correlation = ("", "", "", "", true); }
+                if (client == "unknown" && !correlation.invalid && correlation.session.Length > 0)
+                    client = "workbuddy";
+                if (client == "workbuddy")
+                {
+                    try { (traceId, dialogId, dialogIdMissing) = IdentifyWorkBuddyTurn(ctx, payload); }
+                    catch (Exception) { }
+                }
+            }
+            if (diagnosticsEnabled)
+            {
+                try { diagnosticDetails = DescribeIdentity(ctx, payload); }
+                catch (Exception) { diagnosticDetails = "identity_error=unavailable"; }
+                try { diagnosticDetails += " " + DescribeCorrelation(ctx, payload); }
+                catch (Exception) { diagnosticDetails += " correlation_error=unavailable"; }
+            }
             var requestModel = payload is { Length: > 0 } ? ReadModel(payload) : "";
             var mode = ResolveMode(cfg, requestModel, route);
-            if (cfg.ExperimentalDiagnostics)
+            if (diagnosticsEnabled)
             {
                 diagnosticBodyBytes = payload?.Length ?? -1;
                 diagnosticMode = mode.ToLowerInvariant() switch { "responses" => "responses", "rewrite" => "rewrite", "chat" => "chat", _ => "other" };
@@ -262,8 +281,10 @@ public sealed class ProxyService
                 LogStore.Instance.Warn("请求", $"失败（HTTP {status}）");
             else
                 LogStore.Instance.Request(route.Prefix, alias, target, status, sw.ElapsedMilliseconds);
-            if (cfg.ExperimentalDiagnostics)
+            if (diagnosticsEnabled)
             {
+                try
+                {
                 static string Count(JsonObject? obj, string first, string second)
                 {
                     var value = obj?[first] ?? obj?[second];
@@ -272,10 +293,12 @@ public sealed class ProxyService
                 var selected = conversationId.Length >= 20 ? conversationId[..20] : "missing";
                 var error = cancelled ? "cancelled" : failed ? "proxy_or_stream" : status >= 400 ? "http_error" : "none";
                 LogStore.Instance.Diagnostic($"client={client} session_source={sessionSource} session_stat_sha256_20={selected} trace_present={hasTraceId} request_id_present={hasRequestId} mode={diagnosticMode} body_bytes={diagnosticBodyBytes} status={status} cancelled={cancelled} error_category={error} duration_ms={sw.ElapsedMilliseconds} response_stream={ctx.Response.ContentType?.StartsWith("text/event-stream", StringComparison.OrdinalIgnoreCase) == true} usage_present={usage is not null} input_tokens={Count(usage, "input_tokens", "prompt_tokens")} output_tokens={Count(usage, "output_tokens", "completion_tokens")} {diagnosticDetails}");
+                }
+                catch (Exception) { }
             }
             // 展示名用映射名（alias），计价用真实名（target）——两列分开存，别把不同上游混在一起
             RecordUsage(route.Prefix, alias, target, usage, sw.ElapsedMilliseconds, status, conversationId, startedAt,
-                        client, traceId, dialogId, dialogIdMissing);
+                        client, traceId, dialogId, dialogIdMissing, correlation);
         }
     }
 
@@ -623,7 +646,7 @@ public sealed class ProxyService
                 }
             }
         }
-        catch (System.Text.Json.JsonException) { }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException) { }
         if (session.Length > 0)
             session = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("conversation:" + session))).ToLowerInvariant();
         return (client, session, source, trace, request);
@@ -632,6 +655,78 @@ public sealed class ProxyService
     // 会话识别只检查协议元数据。请求/trace 摘要使用本进程随机密钥，避免保存原始标识，
     // 也避免不同进程的历史 trace 被意外关联；它们是关联线索，不是已证明的用户轮次。
     private static readonly byte[] UsageIdentityKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+    private static (string session, string parent, string request, string root, bool invalid) IdentifyWorkBuddyCorrelation(HttpContext ctx, byte[]? payload, string selectedSession)
+    {
+        bool invalid = false;
+        Guid? Read(string name)
+        {
+            if (!ctx.Request.Headers.TryGetValue(name, out var values)) return null;
+            if (values.Count != 1 || (!Guid.TryParseExact(values[0]?.Trim(), "D", out var id) &&
+                !Guid.TryParseExact(values[0]?.Trim(), "N", out id)) || id == Guid.Empty)
+            {
+                invalid = true;
+                return null;
+            }
+            return id;
+        }
+        var session = Read("X-Conversation-ID");
+        var parent = Read("X-Parent-Conversation-ID");
+        var request = Read("X-Conversation-Request-ID");
+        var root = Read("X-Root-Request-ID");
+        if (session is null || request is null || (parent is not null && root is null) ||
+            (parent is null && root is not null && root != request) || (parent is not null && parent == session))
+            invalid = true;
+        if (session is not null)
+        {
+            var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("conversation:" + session.Value.ToString("D")))).ToLowerInvariant();
+            if (expected != selectedSession) invalid = true;
+            try
+            {
+                if (payload is { Length: > 0 })
+                {
+                    using var document = System.Text.Json.JsonDocument.Parse(payload);
+                    if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) invalid = true;
+                    else
+                    {
+                        void CheckObject(System.Text.Json.JsonElement obj, bool top)
+                        {
+                            var seen = new HashSet<string>(StringComparer.Ordinal);
+                            foreach (var property in obj.EnumerateObject())
+                            {
+                                if (top && property.Name == "metadata")
+                                {
+                                    if (!seen.Add("metadata") || property.Value.ValueKind != System.Text.Json.JsonValueKind.Object) invalid = true;
+                                    else CheckObject(property.Value, false);
+                                    continue;
+                                }
+                                var field = property.Name switch
+                                {
+                                    "conversationId" or "conversation_id" => "session",
+                                    "parentConversationId" or "parent_conversation_id" => "parent",
+                                    "conversationRequestId" or "conversation_request_id" => "request",
+                                    "rootRequestId" or "root_request_id" => "root",
+                                    _ => ""
+                                };
+                                if (field.Length == 0) continue;
+                                if (!seen.Add(field)) invalid = true;
+                                var expectedId = field switch { "session" => session, "parent" => parent, "request" => request, _ => root };
+                                if (property.Value.ValueKind != System.Text.Json.JsonValueKind.String ||
+                                    (!Guid.TryParseExact(property.Value.GetString()?.Trim(), "D", out var id) &&
+                                     !Guid.TryParseExact(property.Value.GetString()?.Trim(), "N", out id)) ||
+                                    expectedId is null || id != expectedId.Value) invalid = true;
+                            }
+                        }
+                        CheckObject(document.RootElement, true);
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException) { invalid = true; }
+        }
+        string Digest(string domain, Guid? id) => id is null ? "" : Convert.ToHexString(
+            System.Security.Cryptography.HMACSHA256.HashData(UsageIdentityKey, Encoding.UTF8.GetBytes(domain + ":" + id.Value.ToString("D")))).ToLowerInvariant();
+        return (Digest("session", session), Digest("session", parent), Digest("dialog", request), Digest("dialog", root), invalid);
+    }
 
     private static (string traceId, string dialogId, bool dialogIdMissing) IdentifyWorkBuddyTurn(HttpContext ctx, byte[]? payload)
     {
@@ -743,14 +838,117 @@ public sealed class ProxyService
         return $"id_digest=hmac_sha256_64_process phase=completed is_chat={HttpMethods.IsPost(ctx.Request.Method) && (ctx.Request.Path.Value?.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) == true)} request_stream={requestStream} message_count={messageCount} tool_count={toolCount} conversation_agreement={agreement} {string.Join(" ", fields)}";
     }
 
+    // 白名单固定生成，绝不把请求提供的名称或值直接写进日志。
+    private static readonly (string Header, string Field)[] CorrelationNames =
+    {
+        ("X-Session-ID", "sessionId"), ("X-Conversation-ID", "conversationId"),
+        ("X-Request-ID", "requestId"), ("X-Conversation-Request-ID", "conversationRequestId"),
+        ("X-Trace-ID", "traceId"), ("X-Span-ID", "spanId"),
+        ("X-Parent-ID", "parentId"), ("X-Parent-Session-ID", "parentSessionId"),
+        ("X-Parent-Conversation-ID", "parentConversationId"), ("X-Parent-Request-ID", "parentRequestId"),
+        ("X-Parent-Trace-ID", "parentTraceId"), ("X-Parent-Span-ID", "parentSpanId"),
+        ("X-Root-ID", "rootId"), ("X-Root-Session-ID", "rootSessionId"),
+        ("X-Root-Conversation-ID", "rootConversationId"), ("X-Root-Request-ID", "rootRequestId"),
+        ("X-Root-Trace-ID", "rootTraceId"), ("X-Root-Span-ID", "rootSpanId"),
+        ("X-Agent-ID", "agentId"), ("X-Parent-Agent-ID", "parentAgentId"), ("X-Root-Agent-ID", "rootAgentId"),
+        ("X-Task-ID", "taskId"), ("X-Parent-Task-ID", "parentTaskId"), ("X-Root-Task-ID", "rootTaskId")
+    };
+
+    private static string DescribeCorrelation(HttpContext ctx, byte[]? payload)
+    {
+        var maxEntries = CorrelationNames.Length * 3;
+        const int maxBody = 256 * 1024;
+        var entries = new List<string>();
+        var truncated = false;
+        void Add(string location, string name, string type, int count, string? value)
+        {
+            if (entries.Count >= maxEntries) { truncated = true; return; }
+            var digest = type == "string" && count == 1 ? "opaque" : "none";
+            if (count == 1 && type == "string" && value is { Length: > 0 and <= 64 })
+            {
+                string? canonical = null;
+                if (Guid.TryParseExact(value, "D", out var id) || Guid.TryParseExact(value, "N", out id))
+                    canonical = id.ToString("D");
+                if (canonical is not null)
+                {
+                    var bytes = Encoding.UTF8.GetBytes("correlation-id-v1:" + canonical);
+                    digest = Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(DiagnosticKey, bytes).AsSpan(0, 12)).ToLowerInvariant();
+                }
+            }
+            entries.Add($"{location}.{name}:{type}:{Math.Min(count, 999)}:{digest}");
+        }
+        foreach (var (header, field) in CorrelationNames)
+            if (ctx.Request.Headers.TryGetValue(header, out var values))
+                Add("header", field, values.Count == 1 && values[0] is not null ? "string" : "multi", values.Count, values.Count == 1 ? values[0] : null);
+
+        var bodyState = payload is null ? "not_captured" : payload.Length == 0 ? "empty" : payload.Length > maxBody ? "too_large" : "invalid";
+        var metadataState = "not_checked";
+        if (payload is { Length: > 0 and <= maxBody })
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(payload, new System.Text.Json.JsonDocumentOptions { MaxDepth = 64 });
+                if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    bodyState = "object";
+                    void Collect(System.Text.Json.JsonElement obj, string location)
+                    {
+                        foreach (var (header, field) in CorrelationNames)
+                        {
+                            var snake = header[2..].Replace('-', '_').ToLowerInvariant();
+                            var count = 0;
+                            System.Text.Json.JsonElement first = default;
+                            foreach (var property in obj.EnumerateObject())
+                                if (property.NameEquals(field) || property.NameEquals(snake)) { if (count == 0) first = property.Value; count++; }
+                            if (count == 0) continue;
+                            var type = count > 1 ? "duplicate" : first.ValueKind switch
+                            {
+                                System.Text.Json.JsonValueKind.String => "string", System.Text.Json.JsonValueKind.Number => "number",
+                                System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False => "boolean",
+                                System.Text.Json.JsonValueKind.Null => "null", System.Text.Json.JsonValueKind.Object => "object",
+                                System.Text.Json.JsonValueKind.Array => "array", _ => "other"
+                            };
+                            Add(location, field, type, count, type == "string" ? first.GetString() : null);
+                        }
+                    }
+                    Collect(doc.RootElement, "body");
+                    var metadataCount = 0;
+                    System.Text.Json.JsonElement metadata = default;
+                    foreach (var property in doc.RootElement.EnumerateObject())
+                        if (property.NameEquals("metadata")) { if (metadataCount == 0) metadata = property.Value; metadataCount++; }
+                    metadataState = metadataCount switch
+                    {
+                        0 => "missing",
+                        > 1 => "duplicate",
+                        _ => metadata.ValueKind switch
+                        {
+                            System.Text.Json.JsonValueKind.Object => "object",
+                            System.Text.Json.JsonValueKind.Array => "array",
+                            System.Text.Json.JsonValueKind.String => "string",
+                            System.Text.Json.JsonValueKind.Number => "number",
+                            System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False => "boolean",
+                            System.Text.Json.JsonValueKind.Null => "null",
+                            _ => "other"
+                        }
+                    };
+                    if (metadataState == "object") Collect(metadata, "metadata");
+                }
+                else bodyState = "non_object";
+            }
+            catch (System.Text.Json.JsonException) { }
+        }
+        return $"correlation_v1={string.Join(",", entries)} correlation_body={bodyState} correlation_metadata={metadataState} correlation_scope=headers_allowlist_body_top_metadata_only correlation_unknown=not_checked correlation_digest_policy=uuid_only_opaque_skipped correlation_digest_scope=process_cross_location correlation_truncated={truncated}";
+    }
+
     /// <summary>把 usage 记进统计。兼容 Responses（input/output）与 Chat（prompt/completion）两种形状。</summary>
     /// <param name="model">展示名：映射名（客户端填的别名），界面按它分组。</param>
     /// <param name="target">真实名：发给上游的模型名，计价用它。</param>
     private static void RecordUsage(string route, string model, string target, JsonObject? usage, long ms, int status,
                                     string conversationId, DateTime startedAt, string client, string traceId,
-                                    string dialogId, bool dialogIdMissing)
+                                    string dialogId, bool dialogIdMissing,
+                                    (string session, string parent, string request, string root, bool invalid) correlation)
     {
-        if (usage is null) { UsageStats.Record(route, model, target, 0, 0, 0, 0, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing); return; }
+        if (usage is null) { UsageStats.Record(route, model, target, 0, 0, 0, 0, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing, correlation.session, correlation.parent, correlation.request, correlation.root, correlation.invalid); return; }
 
         var prompt = usage["input_tokens"]?.GetValue<long?>()
                      ?? usage["prompt_tokens"]?.GetValue<long?>() ?? 0;
@@ -767,7 +965,7 @@ public sealed class ProxyService
         var cacheWrite = details?["cache_write_tokens"]?.GetValue<long?>()
                          ?? usage["cache_creation_input_tokens"]?.GetValue<long?>() ?? 0;
 
-        UsageStats.Record(route, model, target, prompt, completion, cacheRead, cacheWrite, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing);
+        UsageStats.Record(route, model, target, prompt, completion, cacheRead, cacheWrite, ms, status, conversationId, startedAt, client, traceId, dialogId, dialogIdMissing, correlation.session, correlation.parent, correlation.request, correlation.root, correlation.invalid);
     }
 
     private static void CopyAuth(HttpContext ctx, HttpRequestMessage req, RouteRule route)

@@ -42,7 +42,7 @@ dotnet build src/installer -c Release
 - **加一个菜单项**：`AppMenu.cs` 的菜单数据与图标 → `MainWindow.xaml.cs` 的 command 分发。快捷键在 `MainWindow` 的 `PreviewKeyDown`。
 - **加一种转发模式**：`ProxyService.cs` 的模式分派 → `Translator.cs` 的翻译实现 → 上游配置与映射行的模式下拉数据源。
 - **改上游认证或余额查询**：同时检查 `UpstreamSettingsWindow.cs`、`SecretProtection.cs`、`ProxyService.CopyAuth` 和 `PriceSyncWindow`；凭据迁移、地址校验及同源限制须一并验证。
-- **改会话统计或导出**：检查 `ProxyService` 的客户端与标识提取、`UsageStats` 的记录与分组、`LegacyUsageEvidence` 的只读历史推断，以及 `MainWindow` 的筛选和 CSV 导出。请求标识不是已证实的用户轮次。
+- **改会话统计或导出**：检查 `ProxyService` 的入站标识提取与进程内 HMAC、`UsageStats` 的父子关联和冲突处理、`LegacyUsageEvidence` 的只读历史推断，以及 `MainWindow` 的时间、模型筛选和 CSV 导出。验证缺失、冲突、跨进程与旧数据场景；请求标识不是已证实的用户轮次。
 - **改配色**：语义色固定在 `Accent.cs`（错误红 / 警告橙黄），强调色由 `app.ico` 主色 HSL 分桶派生，换图标整套界面跟着换——别把具体色值写死在别处。
 
 ## 图标与配色
@@ -68,6 +68,7 @@ src/
     Config.cs         配置模型与存取（config.json、启动备份 10 份、种子数据）
     UsageStats.cs     用量记录、会话分组、CSV 导出与计价引擎
     LegacyUsageEvidence.cs  从已有诊断记录只读补充历史关联证据
+    WorkBuddyLogEvidence.cs  客户端日志解析器，仅用于独立测试，运行界面不读取客户端日志
     UpstreamSettingsWindow.cs  上游、余额与密钥配置
     SecretProtection.cs  Windows DPAPI 凭据加密与解密
     PricingWindow.*   价格表编辑（分挡 / 时段 / 有效期）
